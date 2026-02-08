@@ -44,6 +44,10 @@ def city_info(city:str):
         zone_range = [39.7547, 116.1994, 40.0244, 116.5452]
         ts = 60
         utc = 0
+    elif city.lower()=='xian':
+        zone_range = [34.2060, 108.9058, 34.2825, 109.0049]
+        ts = 12
+        utc = 8
     else: raise RuntimeError('bad city')
     return zone_range,ts,utc
 def get_connection_strength_matrix_sparse(paths, seg_num):

@@ -1742,7 +1742,7 @@ def api_mlsimp_train(root_model,root_data=None,ts_name=None,ts_train=None,bbox=N
     gnn=GAT() ; gnn.load_state_dict(loadZ_th(gnn_path))
     return gnn,simp,diff
 def init_query_param(dataset, q_type,distri): 
-    t={'Porto':60*60*24*7,'Beijing':1237764824} 
+    t={'Porto':60*60*24*7,'Beijing':1237764824,'Xian':60*60*6,} 
     return 0.02,0.02, t[dataset]
 
 class Rtree():

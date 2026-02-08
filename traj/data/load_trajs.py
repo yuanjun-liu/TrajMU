@@ -4,10 +4,12 @@ import numpy as np
 from _tool.mData import dicted_idx
 from _tool.mFile import path_traj, list_dir, read_lines_iter, parse_line,out_base
 from _tool.mIO import mcache
-from traj.data.process_ts import ids_shrink,ts_bound,ts_shrink,ts_bbox_tim,ts_remove_bad_speed
+from traj.data.process_ts import ids_shrink,ts_bound,ts_shrink,ts_bbox_tim,ts_remove_bad_speed,t_spare
+from _tool.mTime import tim2sec
 traj_data_path = {
     'Beijing':os.path.join(path_traj, 'beijing'),
     'Porto': os.path.join(path_traj, 'Porto/train.csv'),
+    'Xian':os.path.join(path_traj, 'xian'),
 }
 ts_data_name=list(traj_data_path.keys())
 filter_len=10 
@@ -59,10 +61,52 @@ def load_Porto(name='Porto',filter_len=filter_len):
             Types.append(call_type)
     assert len(trajs)==len(UIDS)
     return np.array([np.array(trajs,dtype=object),np.array(UIDS,dtype=int),np.array(Types,dtype=int)],dtype=object)
+def load_xian(name='Xian',time_int=5,dis_int=1e-5,time_span='30m',filter_len=filter_len):
+    """TS,UIDS"""
+    TS=[] ; UIDS=[] ;_uid=None ; uts={}
+    time_span = tim2sec(time_span)
+    def append_filter_len(T):
+        if len(T)>=filter_len:
+            TS.append(T)
+            UIDS.append(_uid)
+    def process_u():
+        for tid in uts:
+            T:list=uts[tid]
+            T.sort(key=lambda x:x[2]);T=np.array(T)
+            T=t_spare(np.array(T),tim_int=time_int,dis_int=dis_int)
+            j=0
+            for i in range(1,len(T)):
+                p,q=T[i-1],T[i]
+                if q[2]-p[2]>time_span:
+                    t=T[j:i];j=i
+                    append_filter_len(t)
+            append_filter_len(T[j:])
+    assert name in traj_data_path
+    for file in list_dir(traj_data_path[name])[3]:
+        # lines=open(file,'r',encoding='utf-8').readlines()
+        print('process',file)
+        for line in read_lines_iter(file,block='100m'):
+            line=line.removesuffix('\n').removesuffix('\t')
+            if len(line)<5:continue
+            uid,tid,tim,lon,lat=parse_line(line,',',str,str,int,float,float)
+            uid=dicted_idx('uid_didi',uid)
+            tid=dicted_idx('tid_didi',tid)
+            if uid!=_uid:
+                process_u()
+                _uid=uid 
+                uts={}
+            if tid not in uts:uts[tid]=[]
+            uts[tid].append([lon,lat,tim])
+    process_u()
+    assert len(TS)==len(UIDS)
+    return np.array([np.array(TS,dtype=object),np.array(UIDS,dtype=int)],dtype=object)
+
+
 
 _load_funs={
     'Porto':load_Porto,
     'Beijing':load_beijing,
+    'Xian':load_xian,
 }
 def load(data):
     """TS,Uids"""
@@ -83,10 +127,12 @@ def load(data):
 traj_bbox={ 
     'Beijing':[[116.1994,116.5452],[39.7547,40.0244]],
     'Porto':[[41.086125252, 41.255937432],[-8.69043114799999, -8.51008941766], ],
+    'Xian':[[108.9058,109.0049],[34.2060,34.2825]],
 }
 traj_tbox={
     'Porto':[1372636853, 1404172787],  
     'Beijing':[1235952614, 1237994859],
+    'Xian':[1475251332, 1477929749],
 }
 @mcache(name='loadB',redir=os.path.join(out_base, "TrajData"),ftype='npy.gz')
 def load_ts_box(data):

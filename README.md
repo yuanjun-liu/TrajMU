@@ -18,7 +18,7 @@ put data into `../KyData/TrajData/Porto` like path,
 
 or modify the base path at `_tool/mFile.py`,
 
-where the dataset can be download at [here](https://github.com/derekwtian/TRMMA)
+most datasets can be download at [here](https://github.com/derekwtian/TRMMA), and remain datasets will be uploaded after reivew.
 
 
 ## run

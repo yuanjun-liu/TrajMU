@@ -26,7 +26,7 @@ test_each_epoch=False
 tune_epoch={'Origin':0, 'Retrain':0, 'FineTune':4, 'NegGrad':7, 'BadT':10,'SCRUB':10,'GDRGMA':2,'TopK':10,'RandomK':4,'SFRon':10,'SSD':1}
 DuRates=[0.1,0.2,0.3]
 DuDrDvTypes=['Area','Usr']
-datasets=['Porto','Beijing']
+datasets=['Porto','Beijing','Xian']
 path_json='./mu-traj.json'
 def one(data,mu,task,urvtype,durate,epoch_tune=None,pre_data=False,pt=True,rerun=False,ptloss=False,test_exist=False):
     batch_size={'Sim':64,'Simp':32,'Map':256,'Rec':256}[task]

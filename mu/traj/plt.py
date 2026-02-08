@@ -10,24 +10,17 @@ from _tool.mList import zipxs
 from _tool.mFile import out_dir
 from _tool.SysMonitor import LogJsonIdxs
 from _tool.mData import alpha
-from matplotlib.patches import Patch
-from matplotlib.colors import ListedColormap, BoundaryNorm
-from traj.data.load_trajs import load_ts_box 
-from traj.data.process_ts import t2ps_steplen_jit as t2ps_steplen
-from _tool.mIO import loadZ_pk,saveZ_pk
-from mu.traj.loaddata import ts_split,fix_trajs_num
-
-MUs = ['Retrain', 'FineTune', 'NegGrad', 'BadT','SCRUB','GDRGMA','TopK','RandomK','SFRon','SSD']
+MUs = ['Retrain','FineTune', 'NegGrad', 'BadT','SCRUB','GDRGMA', 'TopK','RandomK','SFRon','SSD']
 Tasks=['Sim','Simp','Map','Rec']
-Datasets=['Porto','Beijing'] 
+Datasets=['Porto','Beijing','Xian'] 
 DuRates=[0.1,0.2,0.3]
 Urvs=['Usr','Area']
 
 metrics={'Sim':'MR','Simp':'SED','Map':'F1','Rec':'MAE'}
 metrics2={'Sim':'HR10','Simp':'F1','Map':'Acc','Rec':'Acc'}
 metric_keys={
-    'Sim':{'MR':'MR_','MRR':'MRR_','MIA':'MIA2','HR10':'HR10_','HR5':'HR5_','HR1':'HR1_'},
-    'Simp':{'SED':'SEDwQ_','MIA':'MIA3Q','F1':'RangeF1'},
+    'Sim':{'MR':'MR_','MIA':'MIA2','HR10':'HR10_','HR5':'HR5_','HR1':'HR1_'},
+    'Simp':{'SED':'SEDwQ_','MIA':'MIA3Q','F1':'RangeF1','ITS':'ITS_wQ_'},
     'Map':{'Acc':'Acc_','MIA':'MIA5','F1':'F1_'},
     'Rec':{'MAE':'MAE_','MIA':'MIA3','RMSE':'RMSE_','Acc':'Acc_','F1':'F1_'},
     }
@@ -44,7 +37,7 @@ def tbf(x,f,b=3):
     if f==0: return '\\textbf{'+x+'}'
     if f==1: return '\\underline{'+x+'}'
     return x
-def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,metrics=metrics):
+def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,metrics=metrics,sims=False):
     """a col of SimScore/Rank of all MUs"""
     if not isinstance(data,list):data=[data]
     if not isinstance(task,list):task=[task]
@@ -53,8 +46,10 @@ def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,met
     if not isinstance(key,list):key=[key]
     if not isinstance(mu,list):mu=[mu]
     res=[] 
+    gt='Retrain'
     for u in mu:
         ep=tune_epoch[u]
+        ep_gt=tune_epoch[gt]
         _res=0 ; _count=0
         for _data in data:
             for _task in task:
@@ -69,7 +64,9 @@ def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,met
                             _key={'Du':k_du,'Dr':k_dr,'Dv':k_dv,'MIA':k_mia,'time':'time'}[_key]
                             i=[_data,u,_task,_urv,_rate,ep,_key]
                             x=_json[tuple(map(str,i))]
-                            
+                            if sims:
+                                x_gt=_json[tuple(map(str,[_data,gt,_task,_urv,_rate,ep_gt,_key]))]
+                                x=min(x,x_gt)/max(x,x_gt)
                             _res+=x ; _count+=1
         res.append(_res/_count)
     res=np.array(res) if len(res)>1 else res[0]
@@ -126,143 +123,41 @@ def all_tasks_rank_times_rank(task_keys=['Du','Dr','Dv','MIA']):
         print(f'{tbf(sum_rk_time[mi]+1,sum_rk_time[mi],0)}\\\\' +('\\midrule' if mu=='SSD' else ''))
 
 
-def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates):
-    """a col of SimScore/Rank of all MUs"""
-    if not isinstance(data,list):data=[data]
-    if not isinstance(task,list):task=[task]
-    if not isinstance(durate,list):durate=[durate]
-    if not isinstance(urv,list):urv=[urv]
-    if not isinstance(key,list):key=[key]
-    if not isinstance(mu,list):mu=[mu]
-    res=[] 
-    for u in mu:
-        ep=tune_epoch[u]
-        _res=0 ; _count=0
-        for _data in data:
-            for _task in task:
-                for _rate in durate:
-                    for _urv in urv:
-                        for _key in key:
-                            metric=metrics[_task]
-                            k_du=metric_keys[_task][metric]+'Du'
-                            k_dr=metric_keys[_task][metric]+'Dr'
-                            k_dv=metric_keys[_task][metric]+'Dv'
-                            k_mia=metric_keys[_task]['MIA']
-                            _key={'Du':k_du,'Dr':k_dr,'Dv':k_dv,'MIA':k_mia,'time':'time'}[_key]
-                            i=[_data,u,_task,_urv,_rate,ep,_key]
-                            x=_json[tuple(map(str,i))]
-                            
-                            _res+=x ; _count+=1
-        res.append(_res/_count)
-    res=np.array(res) if len(res)>1 else res[0]
-    return res
-
-def plt_trajs(e=1e-4, path_figs='',debug=False):
-    color_red,color_blue=[0.9,0,0,0.8],[0,0,0.9]
-    cmap = ListedColormap([(1,1,1), color_blue, color_red])
-    norm = BoundaryNorm([0, 1, 2, 3], cmap.N) 
-    set_figsize(width=1.1*4,height=1.42*1,dpi=100)
-    fig, axs = plt.subplots(nrows=1,ncols=4)
-    for di,data in enumerate(['Porto','Beijing']):
-        x=load_ts_box(data)
-        ts,uid,bbox=x[0],x[1],x[-1]
-        [xmin,xmax],[ymin,ymax] = bbox
-        gwidth,gheight=int((xmax-xmin)/e)+3,int((ymax-ymin)/e)+3
-        def t2gxgy(T:np.ndarray):
-            T=t2ps_steplen(T,e)
-            x,y=T[:,0],T[:,1]
-            xi,yi=((x-xmin)/e+0.5).astype(int),((y-ymin)/e+0.5).astype(int)
-            return xi,yi
-        durate=0.1
-
-        for ri,urv in enumerate(['Usr','Area']):
-            
-            col=di*2+ri
-            ax:Axes=axs[col]
-            
-            path=os.path.join(out_dir('cache'),f'plt-ts-{data}-{urv}-{durate}.pk.zst')
-            if os.path.exists(path):
-                print('load',path)
-                dr,du=loadZ_pk(path)
-            else:
-                train, val, test, du, dr, dv=ts_split(ts,uid,urv,float(durate))
-                dr_idx,du_idx=fix_trajs_num({'dr':dr,'du':du},float(durate)).values()
-                dr,du=ts[dr_idx],ts[du_idx]
-                saveZ_pk(path,[dr,du])
-            if debug: du,dr=du[:100],dr[:1000]
-            
-            label_map = np.zeros((gwidth,gheight), dtype=int)
-            for T in dr:
-                if T.shape[0] < 2: continue
-                gx,gy=t2gxgy(T)
-                
-                label_map[gx-1,gy]=1
-                label_map[gx-1,gy-1]=1
-                label_map[gx-1,gy+1]=1
-                label_map[gx,gy]=1
-                label_map[gx,gy-1]=1
-                label_map[gx,gy+1]=1
-                label_map[gx+1,gy]=1
-                label_map[gx+1,gy-1]=1
-                label_map[gx+1,gy+1]=1
-            for T in du:
-                if T.shape[0] < 2:continue
-                gx,gy=t2gxgy(T)
-                label_map[gx+1,gy+1]=2
-            ax.imshow(label_map, cmap=cmap, norm=norm, origin='lower')
-            ax.set_ylim(0, gwidth)
-            ax.set_xlim(0, gheight)
-            ax.set_xticks([]);ax.set_yticks([])
-            sdata='BJ' if data =='Beijing' else data
-            if urv=='Usr':urv='User'
-            ax.set_xlabel(f'({alpha[col]}) {int(float(durate)*100)}% {sdata} {urv}')
-            
-            
-    del du,dr
-    legend_elements = [
-        Patch(facecolor=color_blue, edgecolor=None, label='Dr (the remaining set)',color=None),
-        Patch(facecolor=color_red, edgecolor=None, label='Du (the unlearning set)',color=None),
-    ]
-    fig.legend(handles=legend_elements, loc="upper center", bbox_to_anchor=(0.5, 0.996), labelspacing=0.,ncol=2)
-    plt.tight_layout(rect=(0, 0, 1, 0.9))
-    plt.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0.02, hspace=0.06)
-    if path_figs:
-        plt.savefig(path_figs, format='pdf', bbox_inches='tight', dpi=300)
-    plt.show()
-    plt.close(fig)
-
-
-def ana_city_task(keys=['Du','Dr','Dv'],metrics=metrics):
-    """ method | task result on {city1} (x4 task) | task result on {city2} (x4 task)"""
-    raw=np.zeros((len(MUs),8))
-    sim=np.zeros((len(mu2),8))
-    rank=np.zeros((len(mu2),8))
-    for col,(data,task) in enumerate(zipxs(Datasets,Tasks)):
-        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=metrics)
+def ana_metric_city_task(keys=['Du','Dr','Dv'],debug=False): 
+    """method | 4task on [metric1, metric2] x [city1, city2, city3]"""
+    num_col=2*len(Datasets)*len(Tasks)
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    for col,(met,data,task) in enumerate(zipxs([metrics,metrics2],Datasets,Tasks)):
+        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=met)
         for mi,mu in enumerate(mu2):sim[mi,col]=min(raw[0,col],raw[1+mi,col])/max(raw[0,col],raw[1+mi,col])
         rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
-    rk1=np.argsort(np.argsort(-sim[:,:4].sum(axis=1)))
-    rk2=np.argsort(np.argsort(-sim[:,4:].sum(axis=1)))
+        if col%len(Tasks)==len(Tasks)-1:
+            rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
 
-    print('task on city')
+    if debug:rank=rank*0-1
+    print('metric-city-task')
     
     print('Retrain',end='')
-    for col,(data,task) in enumerate(zipxs(Datasets,Tasks)):
-        print(f'&{tbf(raw[0][col],-1,3)}',end='')
-        if task==Tasks[-1]: print('&-',end='')            
+    for col,(_,urv,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        print(f'&{tbf(raw[0][col],-1,3)}',end='')   
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
     print('\\\\ \\midrule')
     
     for mi,mu in enumerate(mu2):
         print(f'{mu}',end='')
-        for i1,data in enumerate(Datasets):
-            for i2,task in enumerate(Tasks):
-                col=i1*len(Tasks)+i2
-                print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
-                if i1==0 and i2==3:print(f'&{tbf(rk1[mi]+1,rk1[mi],0)}',end='  ')
-                if i1==1 and i2==3:print(f'&{tbf(rk2[mi]+1,rk2[mi],0)}',end='  ')
-        print(f'\\\\')
-    return rk1,rk2
-
+        for i1 in range(2):
+            for i2,data in enumerate(Datasets):
+                for i3,task in enumerate(Tasks):
+                    col=i1*len(Datasets)*len(Tasks)+i2*len(Tasks)+i3
+                    print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+                    rk=rks[col//len(Tasks)]
+                    if col%len(Tasks)==len(Tasks)-1:
+                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+        print('\\\\')
+    return rks
 
 def ana_urv_mia():
     """ method | mia result on Usr (x4 task) | task result on Area (x4 task)"""
@@ -295,14 +190,94 @@ def ana_urv_mia():
         print(f'\\\\')
     return rk1,rk2
 
+
+from matplotlib.patches import Patch
+from matplotlib.colors import ListedColormap, BoundaryNorm
+from traj.data.load_trajs import load_ts_box 
+from traj.data.process_ts import t2ps_steplen_jit as t2ps_steplen
+from _tool.mIO import loadZ_pk,saveZ_pk
+from mu.traj.loaddata import ts_split,fix_trajs_num
+def plt_trajs(e=1e-4, path_figs='',debug=False):
+    color_red,color_blue=[0.9,0,0,0.8],[0,0,0.9]
+    cmap = ListedColormap([(1,1,1), color_blue, color_red])
+    norm = BoundaryNorm([0, 1, 2, 3], cmap.N) 
+    set_figsize(width=1.1*3,height=1.42*2,dpi=100)
+    fig, axs = plt.subplots(nrows=2,ncols=3)
+    for di,data in enumerate(['Porto','Beijing','Xian']):
+        x=load_ts_box(data)
+        ts,uid,bbox=x[0],x[1],x[-1]
+        [xmin,xmax],[ymin,ymax] = bbox
+        gwidth,gheight=int((xmax-xmin)/e)+3,int((ymax-ymin)/e)+3
+        def t2gxgy(T:np.ndarray):
+            T=t2ps_steplen(T,e)
+            x,y=T[:,0],T[:,1]
+            xi,yi=((x-xmin)/e+0.5).astype(int),((y-ymin)/e+0.5).astype(int)
+            return xi,yi
+        durate=0.1
+
+        for ri,urv in enumerate(['Usr','Area']):
+            ax:Axes=axs[ri,di]
+            
+            path=os.path.join(out_dir('cache'),f'plt-ts-{data}-{urv}-{durate}.pk.zst')
+            if os.path.exists(path):
+                print('load',path)
+                dr,du=loadZ_pk(path)
+            else:
+                train, val, test, du, dr, dv=ts_split(ts,uid,urv,float(durate))
+                dr_idx,du_idx=fix_trajs_num({'dr':dr,'du':du},float(durate)).values()
+                dr,du=ts[dr_idx],ts[du_idx]
+                saveZ_pk(path,[dr,du])
+            if debug: du,dr=du[:100],dr[:1000]
+            
+            label_map = np.zeros((gwidth,gheight), dtype=int)
+            for T in dr:
+                if T.shape[0] < 2: continue
+                gx,gy=t2gxgy(T)
+                
+                label_map[gx-1,gy]=1
+                label_map[gx-1,gy-1]=1
+                label_map[gx-1,gy+1]=1
+                label_map[gx,gy]=1
+                label_map[gx,gy-1]=1
+                label_map[gx,gy+1]=1
+                label_map[gx+1,gy]=1
+                label_map[gx+1,gy-1]=1
+                label_map[gx+1,gy+1]=1
+            for T in du:
+                if T.shape[0] < 2:continue
+                gx,gy=t2gxgy(T)
+                label_map[gx+1,gy+1]=2
+            ax.imshow(label_map, cmap=cmap, norm=norm, origin='lower',aspect='auto')
+            ax.set_ylim(0, gwidth)
+            ax.set_xlim(0, gheight)
+            ax.set_xticks([]);ax.set_yticks([])
+            sdata='BJ' if data =='Beijing' else data
+            if urv=='Usr':urv='User'
+            ax.set_xlabel(f'({alpha[ri*3+di]}) {int(float(durate)*100)}% {sdata} {urv}')
+            
+            
+    del du,dr
+    legend_elements = [
+        Patch(facecolor=color_blue, edgecolor=None, label='Dr (the remaining set)',color=None),
+        Patch(facecolor=color_red, edgecolor=None, label='Du (the unlearning set)',color=None),
+    ]
+    fig.legend(handles=legend_elements, loc="upper center", bbox_to_anchor=(0.5, 0.998), labelspacing=0.,ncol=2)
+    plt.tight_layout(rect=(0, 0, 1, 0.96))
+    plt.subplots_adjust(left=None, bottom=None, right=None, top=None, wspace=0.02, hspace=0.16)
+    if path_figs:
+        plt.savefig(path_figs, format='pdf', bbox_inches='tight', dpi=300)
+    plt.show()
+    plt.close(fig)
+
 if __name__=='__main__':
+    plt_trajs(path_figs='./urv.pdf')
+
     task_cityurv_raw_simsort('Sim'); print('\n')
     task_cityurv_raw_simsort('Simp'); print('\n')
     task_cityurv_raw_simsort('Map'); print('\n')
     task_cityurv_raw_simsort('Rec'); print('\n')
-    all_tasks_rank_times_rank()
-
-    ana_city_task(metrics=metrics); print('\n')
-    ana_city_task(metrics=metrics2); print('\n')
+    all_tasks_rank_times_rank(); print('\n')
+    
+    ana_metric_city_task(); print('\n') 
     ana_urv_mia(); print('\n')
-
+    

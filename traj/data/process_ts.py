@@ -5,6 +5,15 @@ from typing import List
 from _tool.mData import ids_shrink
 from numba import njit
 
+def t_spare(t:np.ndarray,tim_int=None,dis_int=None):
+    """t is sorted"""
+    if len(t)==0 or tim_int is None and dis_int is None:return t
+    T=[t[0]]
+    for p in t[1:]:
+        if tim_int is not None and p[2]-T[-1][2]<tim_int:continue
+        if dis_int is not None and np.linalg.norm(T[-1][:2]-p[:2])<dis_int:continue
+        T.append(p)
+    return np.array(T)
 def ps_bbox(ps: np.ndarray) -> List[List[float]]:
     """[min_lat,max_lat],[min_lon,max_lon],[min_tim,max_tim],..."""
     if len(ps)==0:return None

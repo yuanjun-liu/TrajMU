@@ -3,7 +3,7 @@ import numpy as np
 from traj.data.load_trajs import load_ts_box as load_traj_raw
 DuDrDvTypes=['Usr','Area']
 traj_len_min=20
-datasets=['Porto','Beijing'] 
+datasets=['Porto','Beijing','Xian'] 
 ''' split of data
 train=du+dr, test+val=dv
 [6 2 2] of [train test val], [5 1 4] of [dr du dv]

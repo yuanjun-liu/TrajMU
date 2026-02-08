@@ -7,8 +7,8 @@ from traj.data.load_trajs import traj_bbox,traj_tbox
 from mu.traj.mia_lstm import MIA as MIA3
 from traj.sim.measures import ITS
 
-fix_traj_len={'Porto':500,'Beijing':110}
-cr={'Porto':0.01,'Beijing':0.05}
+fix_traj_len={'Porto':500,'Beijing':110,'Xian':400}
+cr={'Porto':0.01,'Beijing':0.05,'Xian':0.01}
 def _data_pre(data,root,fix_traj_len):
     path=os.path.join(root,f'ts-n{fix_traj_len}.pk.zst')
     if os.path.exists(path):
