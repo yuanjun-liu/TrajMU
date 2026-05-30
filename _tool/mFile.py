@@ -1,4 +1,3 @@
-
 import sys, os
 is_ipynb="ipykernel" in sys.modules
 is_win = sys.platform == 'win32' or sys.platform == 'cygwin'
@@ -21,7 +20,7 @@ def packet_names():
     return ".".join(relative_path().split('/')[:-1]).replace('..','')
 def check_dir(path):
     dir = os.path.dirname(path)
-    if not os.path.exists(dir):
+    if dir and not os.path.exists(dir):
         os.makedirs(dir)
 def check_file(file):
     return os.path.exists(file)
@@ -95,8 +94,9 @@ def copy(res, dst):
         if not os.path.exists(dst):
             os.makedirs(dst)
     else:
-        if not os.path.exists(os.path.dirname(dst)):
-            os.makedirs(os.path.dirname(dst))
+        dst_dir = os.path.dirname(dst)
+        if dst_dir and not os.path.exists(dst_dir):
+            os.makedirs(dst_dir)
     if os.path.isdir(res):
         for root, dirs, files in os.walk(res):
             for file in files:
@@ -141,10 +141,13 @@ def read_lines_iter(f, skip_lines=0,encoding='utf-8',block='500m'):
                         lines=lines[sk:]
                     for line in lines:
                         yield line+'\n' 
-        raise 'bad block'
+        raise ValueError('bad block')
 def read_xline(file, x, skip_lines=0):
     with open(file, 'r', encoding='utf-8') as f:
         for i in range(skip_lines):
             f.readline()
         for i in range(x):
             print(f.readline())
+if __name__ == '__main__':
+    pass
+

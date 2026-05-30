@@ -6,6 +6,8 @@ from _tool.mList import iterable
 from _tool.mFile import cache_dir, check_file, check_dir,out_dir
 import json,gzip
 import io
+import shutil
+import tempfile
 import zipfile
 import tarfile
 import bz2
@@ -68,16 +70,17 @@ _zip_types=['bz2','gz','xz','zst','zip']
 def is_zipfile(file):
     return any([file.endswith(t) for t in _zip_types])
 def saveZ(file:str,stuff):
-    if file.split('.')[-1] not in _zip_types:TypeError("unsupported type") 
+    if file.split('.')[-1] not in _zip_types:
+        raise TypeError("unsupported type")
     dir = os.path.dirname(file)
-    if not os.path.exists(dir): os.makedirs(dir)
+    if dir and not os.path.exists(dir): os.makedirs(dir)
     if '.npy.' in file: return saveZ_np(file, stuff)
     if '.pk.' in file: return saveZ_pk(file, stuff)
     if '.th.' in file: return saveZ_th(file, stuff)
     raise TypeError("unsupported type")
 def save(file:str, stuff):
     dir = os.path.dirname(file)
-    if not os.path.exists(dir): os.makedirs(dir)
+    if dir and not os.path.exists(dir): os.makedirs(dir)
     if file.endswith('.npy'): return save_np(file, stuff)
     if file.endswith('.txt'):  return save_txt(file, stuff)
     if file.endswith('.pk'): return save_pk(file, stuff)
@@ -88,7 +91,8 @@ def save(file:str, stuff):
     if any([file.endswith(t) for t in _zip_types]): return saveZ(file, stuff)
     raise TypeError("unsupported type")
 def loadZ(file:str):
-    if file.split('.')[-1] not in _zip_types:TypeError("unsupported type") 
+    if file.split('.')[-1] not in _zip_types:
+        raise TypeError("unsupported type")
     if '.npy.' in file: return loadZ_np(file)
     if '.pk.' in file: return loadZ_pk(file)
     if '.th.' in file:  return loadZ_th(file)
@@ -106,6 +110,7 @@ def load(file:str):
 def load_json(file):
     with open(file, 'r') as f: return json.load(f)
 def save_json(file,dic:dict):
+    if (isinstance(dic,list) or isinstance(dic,tuple)) and len(dic)==1:dic=dic[0]
     assert isinstance(dic,dict)
     with open(file, 'w') as f: json.dump(dic, f)
 def load_yaml(file):
@@ -120,7 +125,7 @@ def save_yaml(file, stuff):
 def save_csv(file, data):
     with open(file, 'w', encoding='utf-8') as f:
         for d in data:
-            f.write(",".join(d) + '\n')
+            f.write(",".join(map(str, d)) + '\n')
 def load_csv(file):
     raw = load_txt(file)
     m = [l.rstrip(',').split(',') for l in raw]
@@ -128,7 +133,7 @@ def load_csv(file):
         for y in range(len(m[x])):
             m[x][y] = str2int_float_str(m[x][y].strip())
     return m
-def _tostr(x): return '\t'.join(_tostr(x)) if iterable(x) else x
+def _tostr(x): return '\t'.join(_tostr(x)) if iterable(x) else str(x)
 def save_txt(file, lines):
     with open(file, 'w', encoding='utf-8') as f:
         for line in lines:
@@ -308,5 +313,7 @@ def get_env(name: str):
     if name not in os.environ:
         return None
     return os.environ[name]
+
+
 if __name__ == '__main__':
     pass

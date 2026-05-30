@@ -11,14 +11,11 @@ import numpy as np
 from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
-
-
-
 class SCRUB(MU):
     """min KLD+task in Dr, and max KLD+task on Du"""
     def _unlearn(self,*arg,ptloss=False,estop_fn=None,**kw):
         teacher:Module=deepcopy(self.model) ; student:Module=self.model
-        teacher.eval() ; student.train()
+        teacher.train() ; teacher.requires_grad_(False) ; student.train() 
         opt,sch=student.call_opt_sch()
         du_laoder=DataLoader(self.du,self.bs,True,num_workers=num_workers,collate_fn=self.model.get_collate_fn())
         dr_laoder=DataLoader(self.dr,self.bs,True,num_workers=num_workers,collate_fn=self.model.get_collate_fn())
@@ -50,4 +47,3 @@ class SCRUB(MU):
             self.save_epoch(ep+1)
         self.model=student
         return student
-

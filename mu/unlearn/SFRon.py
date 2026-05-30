@@ -11,9 +11,6 @@ import numpy as np
 from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
-
-
-
 class _SFRon_AdaptiveLoss(torch.nn.Module):
     def __init__(self, loss_function, lambd=1, reduction='mean'):
         super(_SFRon_AdaptiveLoss, self).__init__()
@@ -29,7 +26,6 @@ class _SFRon_AdaptiveLoss(torch.nn.Module):
         elif self.reduction == 'sum':
             ad_loss = ad_loss.sum()
         return ad_loss
-
 class SFRon(MU):
     """nips24, unlearn sensitive param(du_fisher>dr_fisher) on Du, tune on Dr"""
     def __init__(self,**kw):

@@ -6,8 +6,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset,DataLoader
 from _nn.nData import random_seed,auto_device
 from _nn.nBasic import save_weight,load_weight
-from _tool.mFile import check_dir
-from _tool.mIO import loadZ_pk,saveZ_pk
+from _tool.mFile import is_linux,check_dir
+from _tool.mIO import loadZ_pk,saveZ_pk,loadZ_th,saveZ_th
 import time
 import numba
 import csv
@@ -33,17 +33,21 @@ import pickle,json
 device=auto_device()
 random_seed(42)
 if torch.cuda.is_available(): torch.backends.cudnn.deterministic = True
-num_workers=0 
+num_workers=0 if not is_linux else 2
 sys.setrecursionlimit(200000)
 def city_info(city:str):
     if city.lower() == 'porto':
         zone_range = [41.1395, -8.6911, 41.1864, -8.5521]
         ts = 15
         utc = 1
-    elif city.lower() in ['beijing']:
+    elif city.lower() in ['beijing','t-drive','geolife']:
         zone_range = [39.7547, 116.1994, 40.0244, 116.5452]
         ts = 60
         utc = 0
+    elif city.lower()=='chengdu':
+        zone_range = [30.6443, 104.0288, 30.7416, 104.1375]
+        ts = 12
+        utc = 8
     elif city.lower()=='xian':
         zone_range = [34.2060, 108.9058, 34.2825, 109.0049]
         ts = 12
@@ -1492,6 +1496,104 @@ class GPS2SegData(Dataset):
             ls_grid_seq.append([locgrid_xid, locgrid_yid, t])
             mm_eids.append(ds_pt.data['candi_pt'].eid)
         return ls_gps_seq, ls_grid_seq, mm_eids
+class CachedGPS2SegData(Dataset):
+    def __init__(self, base_dataset: GPS2SegData, cache_path: str = ''):
+        self.base = base_dataset
+        self.parameters = base_dataset.parameters
+        self.rn = base_dataset.rn
+        self.mbr = base_dataset.mbr
+        self.grid_size = base_dataset.grid_size
+        self.time_span = base_dataset.time_span
+        self.trajs = base_dataset.trajs
+        self.is_train = base_dataset.is_train
+        self.keep_ratio = base_dataset.keep_ratio
+        self.cache_path = cache_path
+        self._full_cache = None
+        self._load_or_build()
+    def _get_point_base_candidates(self, gps, candi_size, search_dist):
+        step = 10
+        gps_pt = SPoint(gps[0], gps[1])
+        candis = []
+        cur_dist = search_dist
+        while len(candis) == 0:
+            mbr = MBR(
+                gps_pt.lat - cur_dist * LAT_PER_METER,
+                gps_pt.lng - cur_dist * LNG_PER_METER,
+                gps_pt.lat + cur_dist * LAT_PER_METER,
+                gps_pt.lng + cur_dist * LNG_PER_METER,
+            )
+            candis = self.rn.get_candidates(gps_pt, mbr)
+            cur_dist += step
+        candis.sort(key=lambda elem: elem.error)
+        candis = candis[:candi_size]
+        return [
+            (int(c.eid), float(c.lat), float(c.lng), float(c.error), float(c.offset), float(c.rate))
+            for c in candis
+        ]
+    def _build_full_cache(self):
+        cache = []
+        for traj in self.trajs:
+            full_pt_list = traj.pt_list
+            point_cache = []
+            for ds_pt in full_pt_list:
+                point_cache.append(
+                    self._get_point_base_candidates(
+                        [ds_pt.lat, ds_pt.lng],
+                        self.parameters['candi_size'],
+                        self.parameters['search_dist'],
+                    )
+                )
+            cache.append(point_cache)
+        return cache
+    def _load_or_build(self):
+        if self.cache_path and os.path.exists(self.cache_path):
+            self._full_cache = loadZ_pk(self.cache_path)
+            if len(self._full_cache) == len(self.trajs):
+                return
+        self._full_cache = self._build_full_cache()
+        if self.cache_path:
+            check_dir(os.path.dirname(self.cache_path) + os.sep)
+            saveZ_pk(self.cache_path, self._full_cache)
+    def __len__(self):
+        return len(self.trajs)
+    def __getitem__(self, index):
+        traj = self.trajs[index]
+        if self.is_train:
+            length = len(traj.pt_list)
+            keep_index = [0] + sorted(random.sample(range(1, length - 1), int((length - 2) * self.keep_ratio))) + [length - 1]
+        else:
+            keep_index = traj.low_idx
+        if not isinstance(keep_index, (list, tuple)):
+            keep_index = list(keep_index)
+        src_list = np.array(traj.pt_list, dtype=object)[keep_index].tolist()
+        src_gps_seq, src_grid_seq, trg_rid = self.base.get_seqs(src_list)
+        vecs = list(zip(src_gps_seq[:-1], src_gps_seq[1:]))
+        vecs_later = vecs + [vecs[-1]]
+        vecs_pre = [vecs[0]] + vecs
+        all_base_candidates = self._full_cache[index]
+        selected_base = [all_base_candidates[i] for i in keep_index]
+        trg_candis = []
+        for ds_pt, (p1, p2), (p3, p4), candis_info in zip(src_gps_seq, vecs_later, vecs_pre, selected_base):
+            gps_pt = SPoint(ds_pt[0], ds_pt[1])
+            vec_l = (p2[0] - p1[0], p2[1] - p1[1])
+            vec_p = (p4[0] - p3[0], p4[1] - p3[1])
+            candis = []
+            for eid, lat, lng, error, offset, rate in candis_info:
+                candi = CandidatePoint(lat, lng, eid, error, offset, rate)
+                candi = self.rn.add_candi_attrs(candi, gps_pt, vec_l, vec_p, 1, self.parameters['beta'])
+                candis.append(candi)
+            trg_candis.append(candis)
+        candi_label, candi_id, candi_feat, candi_mask = self.base.get_candis_feats(trg_candis, trg_rid)
+        return (
+            torch.tensor(src_grid_seq, dtype=torch.float32),
+            trg_rid,
+            candi_label,
+            candi_id,
+            candi_feat,
+            candi_mask,
+        )
+def cache_gps2seg_dataset(dataset: GPS2SegData, cache_path: str = ''):
+    return CachedGPS2SegData(dataset, cache_path=cache_path)
 def api_pre_gsp2segdata(trajs,rn,mbr,paramters,mode,is_train,path=''):
     ...
 class Attention(nn.Module):
@@ -2426,6 +2528,7 @@ class DAPlanner(object):
         self.freq_limit = 1
         self.dcsm_theta = 1
         self.no_path_cnt = 0
+        self._route_cache = LimitedSizeDict(size_limit=200000)
     def planning_multi_batch(self, ods, ts):
         preds = []
         for i, od in enumerate(ods):
@@ -2433,6 +2536,11 @@ class DAPlanner(object):
             preds.append(route)
         return preds
     def planning_multi(self, od, t, mode='da', segs_flag=False):
+        cache_key = None
+        if (not segs_flag) and mode in ['time', 'length']:
+            cache_key = (mode, tuple(od))
+            if cache_key in self._route_cache:
+                return list(self._route_cache.get(cache_key))
         pred = [od[0]]
         timestamp = t + self.seg_info.get_seg_travel_time(od[0])
         segs = []
@@ -2513,6 +2621,8 @@ class DAPlanner(object):
         if segs_flag:
             return pred, segs
         else:
+            if cache_key is not None:
+                self._route_cache[cache_key] = tuple(pred)
             return pred
     def break_tie_angle(self, curr, tie_nbrs, d):
         curr_geo = self.seg_info.get_seg_geo(curr)
@@ -2720,15 +2830,15 @@ class TrajRecData(Dataset):
             mm_rates.append([candi_pt.rate])
         return mm_eids, mm_rates
 def api_pre_trajrecdata(trajs,rn,mbr,paramters,mode,is_train,path=''):
-    if path and os.path.exists(path):return loadZ_pk(path)
+    if path and os.path.exists(path):return NewTrajRecData(loadZ_pk(path))
     data=TrajRecData(rn,trajs,mbr,paramters,mode,is_train)
     res=[data[i] for i in range(len(data))]
     if path: saveZ_pk(path,res)
-    return res
+    return NewTrajRecData(res)
 class NewTrajRecData(Dataset):
     def __init__(self,trajrecdata_ed):
         self.data=trajrecdata_ed
-    def __len__(self):return self.data
+    def __len__(self):return len(self.data)
     def __getitem__(self, i):
         return self.data[i]
 class GPSFormer(nn.Module):
@@ -2945,8 +3055,6 @@ class DecoderMulti(nn.Module):
                                 tmp_flag = False
             outputs_id[t] = prediction_id
             outputs_rate[t] = prediction_rate
-            
-            
             if teacher_force:
                 input_id = trg_id[t]
                 input_rate = trg_rate[t]
@@ -3187,16 +3295,23 @@ class TrajRecTestData(Dataset):
             mm_eids.append(self.rn.valid_edge_one[candi_pt.eid])
             mm_rates.append([candi_pt.rate])
         return mm_gps_seq, mm_eids, mm_rates, time_arrs
-def api_pre_trajrectestdata(trajs,rn,mbr,paramters,path=''):
-    if path and os.path.exists(path):return loadZ_pk(path)
-    data=TrajRecTestData(rn,trajs,mbr,paramters)
+def api_pre_trajrectestdata(trajs,rn,mbr,paramters,dam,path=''):
+    if path and os.path.exists(path):
+        cache = loadZ_pk(path)
+        if isinstance(cache, dict):
+            return NewTrajRecTestData(cache['items'], cache.get('groups', []), cache.get('src_mms', []))
+        return NewTrajRecTestData(cache)
+    data=TrajRecTestData(rn,trajs,mbr,paramters,dam)
     res=[data[i] for i in range(len(data))]
-    if path: saveZ_pk(path,res)
-    return res
+    cache = {'items': res, 'groups': data.groups, 'src_mms': data.src_mms}
+    if path: saveZ_pk(path,cache)
+    return NewTrajRecTestData(cache['items'], cache['groups'], cache['src_mms'])
 class NewTrajRecTestData(Dataset):
-    def __init__(self,data_ed):
+    def __init__(self,data_ed, groups=None, src_mms=None):
         self.data=data_ed
-    def __len__(self):return self.data
+        self.groups=[] if groups is None else groups
+        self.src_mms=[] if src_mms is None else src_mms
+    def __len__(self):return len(self.data)
     def __getitem__(self, i):
         return self.data[i]
 def toseq(rn, rids, rates, path, seg_info):
@@ -3226,8 +3341,8 @@ def toseq(rn, rids, rates, path, seg_info):
     return seqs
 def trmma_arg(root_map,rn,dataname):
     zone_range,ts,utc=city_info(dataname)
-    args= {'device': device,'transformer_layers': 4,'heads': 4,'tandem_fea_flag': True,'pro_features_flag': True,'srcseg_flag': False,'da_route_flag': True,'rate_flag': True,'prog_flag': False,'dest_type': 2,'gps_flag': True,'rid_feats_flag': True,'learn_pos': True,'search_dist': 50,'beta': 15,'gamma': 30,'rid_fea_dim': 18, 'pro_input_dim': 48,  'pro_output_dim': 8,'min_lat': zone_range[0],'min_lng': zone_range[1],'max_lat': zone_range[2],'max_lng': zone_range[3],'city': dataname,'keep_ratio': 0.1,'grid_size': 50,'time_span': ts,'hid_dim': 64,'id_emb_dim': 64,'dropout': 0.1,'id_size': rn.valid_edge_cnt_one,'lambda1': 10,'lambda2': 5,'n_epochs': 50,'batch_size': 256,'learning_rate': 1e-3,"lr_step": 2,"lr_decay": 0.8,'tf_ratio': 1,'decay_flag': True,'decay_ratio': 0.9,'clip': 1,'log_step': 1,'utc': utc,'small': False,'eid_cate': 'gps2seg','inferred_seg_path': '','planner': 'da','debug': False, 'root_map': root_map,} 
-    args['planner']='length' 
+    args= {'device': device,'transformer_layers': 4,'heads': 4,'tandem_fea_flag': True,'pro_features_flag': True,'srcseg_flag': False,'da_route_flag': True,'rate_flag': True,'prog_flag': False,'dest_type': 2,'gps_flag': True,'rid_feats_flag': True,'learn_pos': True,'search_dist': 50,'beta': 15,'gamma': 30,'rid_fea_dim': 18, 'pro_input_dim': 48,  'pro_output_dim': 8,'min_lat': zone_range[0],'min_lng': zone_range[1],'max_lat': zone_range[2],'max_lng': zone_range[3],'city': dataname,'keep_ratio': 0.1,'grid_size': 50,'time_span': ts,'hid_dim': 64,'id_emb_dim': 64,'dropout': 0.1,'id_size': rn.valid_edge_cnt_one,'lambda1': 10,'lambda2': 5,'n_epochs': 50,'batch_size': 256,'learning_rate': 1e-3,"lr_step": 2,"lr_decay": 0.8,'tf_ratio': 1,'decay_flag': True,'decay_ratio': 0.9,'clip': 1,'log_step': 1,'utc': utc,'small': False,'eid_cate': 'gps2seg','inferred_seg_path': '','planner': 'da','root_map': root_map,}
+    args['planner']='length'
     mbr = MBR(args['min_lat'], args['min_lng'], args['max_lat'], args['max_lng'])
     args['grid_num'] = gps2grid(SPoint(args['max_lat'], args['max_lng']), mbr, args['grid_size'])
     args['grid_num'] = (args['grid_num'][0] + 1, args['grid_num'][1] + 1)

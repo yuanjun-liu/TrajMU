@@ -11,9 +11,6 @@ import numpy as np
 from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
-
-
-
 class BadT(MU):
     """min KLD(student,teacher) & max KLD(student,random) on Dr"""
     def __init__(self, **kw):
@@ -22,7 +19,8 @@ class BadT(MU):
         self.bs=int(self.bs*0.8) 
     def _unlearn(self,*arg,ptloss=False,estop_fn=None,**kw):
         good=deepcopy(self.model) ; bad=deepcopy(self.model) ; bad.call_new_model()
-        opt,sch=self.model.call_opt_sch() ; self.model.train(); self.model.model.train() ; bad.eval() ; good.eval() 
+        opt,sch=self.model.call_opt_sch()
+        self.model.train(); self.model.model.train() ; bad.train() ; good.train() ; bad.requires_grad_(False);good.requires_grad_(False)
         dr_laoder=DataLoader(self.dr,self.bs,True,num_workers=num_workers,collate_fn=self.model.get_collate_fn())
         for ep in range(self.epoch_tune): 
             for bi,x in enumerate(dr_laoder):
@@ -45,4 +43,3 @@ class BadT(MU):
                 if ep>=1 and estop_fn is not None and estop_fn(loss.item()):return self.model
             self.save_epoch(ep+1)
         return self.model
-

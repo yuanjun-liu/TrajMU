@@ -4,7 +4,6 @@ import numpy as np
 from typing import List
 from _tool.mData import ids_shrink
 from numba import njit
-
 def t_spare(t:np.ndarray,tim_int=None,dis_int=None):
     """t is sorted"""
     if len(t)==0 or tim_int is None and dis_int is None:return t

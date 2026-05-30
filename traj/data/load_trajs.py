@@ -34,8 +34,6 @@ def load_beijing(name='Beijing',filter_len=filter_len):
             UIDS.append(uid)
     assert len(TS)==len(UIDS)
     return np.array([np.array(TS,dtype=object),np.array(UIDS,dtype=int)],dtype=object)
-
-
 def load_Porto(name='Porto',filter_len=filter_len):
     """TS,UIDS,Type"""
     assert name in traj_data_path
@@ -83,7 +81,6 @@ def load_xian(name='Xian',time_int=5,dis_int=1e-5,time_span='30m',filter_len=fil
             append_filter_len(T[j:])
     assert name in traj_data_path
     for file in list_dir(traj_data_path[name])[3]:
-        # lines=open(file,'r',encoding='utf-8').readlines()
         print('process',file)
         for line in read_lines_iter(file,block='100m'):
             line=line.removesuffix('\n').removesuffix('\t')
@@ -100,9 +97,6 @@ def load_xian(name='Xian',time_int=5,dis_int=1e-5,time_span='30m',filter_len=fil
     process_u()
     assert len(TS)==len(UIDS)
     return np.array([np.array(TS,dtype=object),np.array(UIDS,dtype=int)],dtype=object)
-
-
-
 _load_funs={
     'Porto':load_Porto,
     'Beijing':load_beijing,

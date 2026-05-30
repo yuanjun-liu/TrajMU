@@ -12,7 +12,6 @@ from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
 
-
 class RandomK(MU):
     """modify k% paramter, tune. tkde25 Machine Unlearning Through Fine-Grained Model Parameters Perturbation"""
     def __init__(self,  **kw):
@@ -22,7 +21,7 @@ class RandomK(MU):
         return super().mu_name()+f'{self.k}_{self.noise_range}'
     def _unlearn(self,*arg,ptloss=False,estop_fn=None,**kw):
         ori_model=deepcopy(self.model)
-        ori_model.eval() ; ori_model.requires_grad_(False)
+        ori_model.train() ; ori_model.requires_grad_(False)
         opt,sch=self.model.call_opt_sch() 
         rate=self.k if self.k<1 else int(self.k*len(get_grad_vec(self.model)))
         for name,para in self.model.named_parameters():
@@ -62,4 +61,3 @@ class RandomK(MU):
                     return self.model
             self.save_epoch(ep+1)
         return self.model
-

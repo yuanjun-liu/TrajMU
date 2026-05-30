@@ -10,26 +10,21 @@ from _tool.mList import zipxs
 from _tool.mFile import out_dir
 from _tool.SysMonitor import LogJsonIdxs
 from _tool.mData import alpha
+from mu.traj.model_registry import get_metric_bundle, task_model_name, task_result_name
 MUs = ['Retrain','FineTune', 'NegGrad', 'BadT','SCRUB','GDRGMA', 'TopK','RandomK','SFRon','SSD']
 Tasks=['Sim','Simp','Map','Rec']
 Datasets=['Porto','Beijing','Xian'] 
 DuRates=[0.1,0.2,0.3]
 Urvs=['Usr','Area']
-
-metrics={'Sim':'MR','Simp':'SED','Map':'F1','Rec':'MAE'}
-metrics2={'Sim':'HR10','Simp':'F1','Map':'Acc','Rec':'Acc'}
-metric_keys={
-    'Sim':{'MR':'MR_','MIA':'MIA2','HR10':'HR10_','HR5':'HR5_','HR1':'HR1_'},
-    'Simp':{'SED':'SEDwQ_','MIA':'MIA3Q','F1':'RangeF1','ITS':'ITS_wQ_'},
-    'Map':{'Acc':'Acc_','MIA':'MIA5','F1':'F1_'},
-    'Rec':{'MAE':'MAE_','MIA':'MIA3','RMSE':'RMSE_','Acc':'Acc_','F1':'F1_'},
-    }
-
+model1_metrics1={task:get_metric_bundle(task,model_group=1)['primary'] for task in Tasks}
+model1_metrics2={task:get_metric_bundle(task,model_group=1)['secondary'] for task in Tasks}
+model2_metrics1={task:get_metric_bundle(task,model_group=2)['primary'] for task in Tasks}
+model2_metrics2={task:get_metric_bundle(task,model_group=2)['secondary'] for task in Tasks}
+metricses=[[model1_metrics1,model1_metrics2],[model2_metrics1,model2_metrics2]]
 path_res='./mu-traj.json'
 tune_epoch={'Origin':0, 'Retrain':0, 'FineTune':4, 'NegGrad':7, 'BadT':10,'SCRUB':10,'GDRGMA':2,'TopK':10,'RandomK':4,'SFRon':10,'SSD':1}
 _json=LogJsonIdxs(path_res,refresh=False,mode='r')
 mu2=[x for x in MUs if x != 'Retrain']
-
 def tbf(x,f,b=3):
     x=float(x)
     a=f':.{b}f'
@@ -37,7 +32,41 @@ def tbf(x,f,b=3):
     if f==0: return '\\textbf{'+x+'}'
     if f==1: return '\\underline{'+x+'}'
     return x
-def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,metrics=metrics,sims=False):
+def _stable_unlearn_batch(mu, unlearn_batch=1):
+    return 1 if mu in {'Origin','Retrain'} else unlearn_batch
+def _task_metric(task, model, metrics_map):
+    if isinstance(metrics_map, dict):
+        if task in metrics_map and not isinstance(metrics_map[task], dict):
+            return metrics_map[task]
+        task_key=task_result_name(task, model)
+        if task_key in metrics_map:
+            return metrics_map[task_key]
+    return get_metric_bundle(task, model)['primary']
+def _metric_key_name(task, model, metric):
+    return get_metric_bundle(task, model)['metric_keys'][metric]
+_abs_compare_metrics={'MIA','HR','HR1','HR5','HR10','F1','Acc','AVGTC'}
+def _is_abs_compare_metric(metric):
+    return metric in _abs_compare_metrics or (isinstance(metric,str) and metric.startswith('TC') and metric[2:].isdigit())
+def _comparison_metric(task, model, metrics_map, key):
+    if isinstance(task,list):
+        ms=[_comparison_metric(t,model,metrics_map,key) for t in task]
+        return ms[0] if all(m==ms[0] for m in ms) else None
+    if isinstance(key,list):
+        ms=[_comparison_metric(task,model,metrics_map,k) for k in key]
+        return ms[0] if all(m==ms[0] for m in ms) else None
+    if key=='MIA':
+        return 'MIA'
+    if key=='time':
+        return 'time'
+    return _task_metric(task,model,metrics_map)
+def _similarity_score(x,x_gt,metric):
+    if _is_abs_compare_metric(metric):
+        return 1-abs(x-x_gt)
+    x_max=max(x,x_gt)
+    if x_max==0:
+        return 1
+    return min(x,x_gt)/x_max
+def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,metrics=model1_metrics1,sims=False,unlearn_batch=1,model_group=1):
     """a col of SimScore/Rank of all MUs"""
     if not isinstance(data,list):data=[data]
     if not isinstance(task,list):task=[task]
@@ -50,154 +79,50 @@ def json_item(data=Datasets,mu=mu2,task=Tasks,urv=Urvs,key='',durate=DuRates,met
     for u in mu:
         ep=tune_epoch[u]
         ep_gt=tune_epoch[gt]
+        stable_unlearn_batch=_stable_unlearn_batch(u,unlearn_batch)
+        stable_unlearn_batch_gt=_stable_unlearn_batch(gt,unlearn_batch)
         _res=0 ; _count=0
         for _data in data:
             for _task in task:
+                if _data=='AIS':
+                    if _task=='Rec':model_group=2 
+                    else:model_group=1
+                _task_name=task_result_name(_task,model_group)
                 for _rate in durate:
                     for _urv in urv:
                         for _key in key:
-                            metric=metrics[_task]
-                            k_du=metric_keys[_task][metric]+'Du'
-                            k_dr=metric_keys[_task][metric]+'Dr'
-                            k_dv=metric_keys[_task][metric]+'Dv'
-                            k_mia=metric_keys[_task]['MIA']
+                            metric=_task_metric(_task,model_group,metrics)
+                            comparison_metric=_comparison_metric(_task,model_group,metrics,_key)
+                            k_du=_metric_key_name(_task,model_group,metric)+'Du'
+                            k_dr=_metric_key_name(_task,model_group,metric)+'Dr'
+                            k_dv=_metric_key_name(_task,model_group,metric)+'Dv'
+                            k_mia=_metric_key_name(_task,model_group,'MIA')
                             _key={'Du':k_du,'Dr':k_dr,'Dv':k_dv,'MIA':k_mia,'time':'time'}[_key]
-                            i=[_data,u,_task,_urv,_rate,ep,_key]
+                            i=[_data,u,_task_name,_urv,_rate,ep]
+                            if stable_unlearn_batch!=1:
+                                i.append(f'u{stable_unlearn_batch}')
+                            i.append(_key)
                             x=_json[tuple(map(str,i))]
+                            if x is None: raise RuntimeError()
                             if sims:
-                                x_gt=_json[tuple(map(str,[_data,gt,_task,_urv,_rate,ep_gt,_key]))]
-                                x=min(x,x_gt)/max(x,x_gt)
+                                i_gt=[_data,gt,_task_name,_urv,_rate,ep_gt]
+                                if stable_unlearn_batch_gt!=1:
+                                    i_gt.append(f'u{stable_unlearn_batch_gt}')
+                                i_gt.append(_key)
+                                x_gt=_json[tuple(map(str,i_gt))]
+                                if x_gt is None:raise RuntimeError()
+                                x=_similarity_score(x,x_gt,comparison_metric)
                             _res+=x ; _count+=1
         res.append(_res/_count)
     res=np.array(res) if len(res)>1 else res[0]
     return res
-
-def task_cityurv_raw_simsort(task,keys=['Du','Dr','Dv','MIA'],pt=True,durate=DuRates):
-    """ method | task result of {data}-{urv} (x4) | rank of SimScore  """
-    raw=np.zeros((len(MUs),len(Datasets)*len(Urvs)*len(keys)))
-    sim=np.zeros((len(mu2),len(Datasets)*len(Urvs)*len(keys)))
-    rank=np.zeros((len(mu2),len(Datasets)*len(Urvs)*len(keys)))
-    for col,(data,urv,key) in enumerate(zipxs(Datasets,Urvs,keys)):
-        raw[:,col]=json_item(data=data,mu=MUs,task=task,urv=urv,key=key,durate=durate)
-        for mi,mu in enumerate(mu2):sim[mi,col]=min(raw[0,col],raw[1+mi,col])/max(raw[0,col],raw[1+mi,col])
-        
-        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
-    sim_sum=sim.sum(axis=1)
-    rk_sum=np.argsort(np.argsort(-sim_sum))
-    
-    if not pt:return rk_sum
-    print(task)
-    
-    print('Retrain&',end='')
-    for col,(data,urv,key) in enumerate(zipxs(Datasets,Urvs,keys)):
-        print(f'{tbf(raw[0][col],-1,3)}&',end='')
-    print('-\\\\ \\midrule')
-    
-    for mi,mu in enumerate(mu2):
-        print(f'{mu}&',end='')
-        for col,(data,urv,key) in enumerate(zipxs(Datasets,Urvs,keys)):
-            print(f'{tbf(raw[1+mi][col],rank[mi][col],3)}&',end='')
-        print(f'{tbf(rk_sum[mi]+1,rk_sum[mi],0)} \\\\'+('\\midrule' if mu=='SSD' else ''))
-    return rk_sum
-def all_tasks_rank_times_rank(task_keys=['Du','Dr','Dv','MIA']):
-    """ task ranks (x4) | rank | Time speed up (x4) | rank  """
-    rk_tasks=np.zeros((len(mu2),4),dtype=int)
-    sp_time=np.zeros((len(mu2),4))
-    rk_time=np.zeros((len(mu2),4),dtype=int)
-    for ti,task in enumerate(Tasks):
-        rk_tasks[:,ti]=task_cityurv_raw_simsort(task=task,pt=False,keys=task_keys)
-        gt_time=json_item(mu='Retrain',task=task,key='time')
-        time=json_item(task=task,key='time')
-        sp_time[:,ti]=gt_time/time
-        rk_time[:,ti]=np.argsort(np.argsort(-sp_time[:,ti]))
-    sum_rk_task=rk_tasks.sum(axis=1)
-    sum_rk_time=rk_time.sum(axis=1)
-    sum_rk_task=np.argsort(np.argsort(sum_rk_task))
-    sum_rk_time=np.argsort(np.argsort(sum_rk_time))
-    
-    for mi,mu in enumerate(mu2):
-        print(f'{mu}&',end='')
-        for ti,task in enumerate(Tasks): print(f'{tbf(rk_tasks[mi,ti]+1,rk_tasks[mi,ti],0)}&',end='')
-        print(f'{tbf(sum_rk_task[mi]+1,sum_rk_task[mi],0)}&',end='  ')
-        for ti,task in enumerate(Tasks): print(f'{tbf(sp_time[mi,ti],rk_time[mi,ti],0)}&',end='')
-        print(f'{tbf(sum_rk_time[mi]+1,sum_rk_time[mi],0)}\\\\' +('\\midrule' if mu=='SSD' else ''))
-
-
-def ana_metric_city_task(keys=['Du','Dr','Dv'],debug=False): 
-    """method | 4task on [metric1, metric2] x [city1, city2, city3]"""
-    num_col=2*len(Datasets)*len(Tasks)
-    raw=np.zeros((len(MUs),num_col))
-    sim=np.zeros((len(mu2),num_col))
-    rank=np.zeros((len(mu2),num_col))
-    rks=[]
-    for col,(met,data,task) in enumerate(zipxs([metrics,metrics2],Datasets,Tasks)):
-        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=met)
-        for mi,mu in enumerate(mu2):sim[mi,col]=min(raw[0,col],raw[1+mi,col])/max(raw[0,col],raw[1+mi,col])
-        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
-        if col%len(Tasks)==len(Tasks)-1:
-            rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
-
-    if debug:rank=rank*0-1
-    print('metric-city-task')
-    
-    print('Retrain',end='')
-    for col,(_,urv,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
-        print(f'&{tbf(raw[0][col],-1,3)}',end='')   
-        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
-    print('\\\\ \\midrule')
-    
-    for mi,mu in enumerate(mu2):
-        print(f'{mu}',end='')
-        for i1 in range(2):
-            for i2,data in enumerate(Datasets):
-                for i3,task in enumerate(Tasks):
-                    col=i1*len(Datasets)*len(Tasks)+i2*len(Tasks)+i3
-                    print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
-                    rk=rks[col//len(Tasks)]
-                    if col%len(Tasks)==len(Tasks)-1:
-                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
-        print('\\\\')
-    return rks
-
-def ana_urv_mia():
-    """ method | mia result on Usr (x4 task) | task result on Area (x4 task)"""
-    raw=np.zeros((len(MUs),8))
-    sim=np.zeros((len(mu2),8))
-    rank=np.zeros((len(mu2),8))
-    for col,(urv,task) in enumerate(zipxs(Urvs,Tasks)):
-        raw[:,col]=json_item(urv=urv,mu=MUs,task=task,key='MIA')
-        for mi,mu in enumerate(mu2):sim[mi,col]=min(raw[0,col],raw[1+mi,col])/max(raw[0,col],raw[1+mi,col])
-        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
-    rk1=np.argsort(np.argsort(-sim[:,:4].sum(axis=1)))
-    rk2=np.argsort(np.argsort(-sim[:,4:].sum(axis=1)))
-
-    print('mia on Scenarios')
-    
-    print('Retrain',end='')
-    for col,(urv,task) in enumerate(zipxs(Urvs,Tasks)):
-        print(f'&{tbf(raw[0][col],-1,3)}',end='')
-        if task==Tasks[-1]: print('&-',end='')            
-    print('\\\\ \\midrule')
-    
-    for mi,mu in enumerate(mu2):
-        print(f'{mu}',end='')
-        for i1,urv in enumerate(Urvs):
-            for i2,task in enumerate(Tasks):
-                col=i1*len(Tasks)+i2
-                print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
-                if i1==0 and i2==3:print(f'&{tbf(rk1[mi]+1,rk1[mi],0)}',end='  ')
-                if i1==1 and i2==3:print(f'&{tbf(rk2[mi]+1,rk2[mi],0)}',end='  ')
-        print(f'\\\\')
-    return rk1,rk2
-
-
 from matplotlib.patches import Patch
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from traj.data.load_trajs import load_ts_box 
 from traj.data.process_ts import t2ps_steplen_jit as t2ps_steplen
 from _tool.mIO import loadZ_pk,saveZ_pk
 from mu.traj.loaddata import ts_split,fix_trajs_num
-def plt_trajs(e=1e-4, path_figs='',debug=False):
+def plt_trajs(e=1e-4, path_figs=''):
     color_red,color_blue=[0.9,0,0,0.8],[0,0,0.9]
     cmap = ListedColormap([(1,1,1), color_blue, color_red])
     norm = BoundaryNorm([0, 1, 2, 3], cmap.N) 
@@ -214,10 +139,8 @@ def plt_trajs(e=1e-4, path_figs='',debug=False):
             xi,yi=((x-xmin)/e+0.5).astype(int),((y-ymin)/e+0.5).astype(int)
             return xi,yi
         durate=0.1
-
         for ri,urv in enumerate(['Usr','Area']):
             ax:Axes=axs[ri,di]
-            
             path=os.path.join(out_dir('cache'),f'plt-ts-{data}-{urv}-{durate}.pk.zst')
             if os.path.exists(path):
                 print('load',path)
@@ -227,13 +150,10 @@ def plt_trajs(e=1e-4, path_figs='',debug=False):
                 dr_idx,du_idx=fix_trajs_num({'dr':dr,'du':du},float(durate)).values()
                 dr,du=ts[dr_idx],ts[du_idx]
                 saveZ_pk(path,[dr,du])
-            if debug: du,dr=du[:100],dr[:1000]
-            
             label_map = np.zeros((gwidth,gheight), dtype=int)
             for T in dr:
                 if T.shape[0] < 2: continue
                 gx,gy=t2gxgy(T)
-                
                 label_map[gx-1,gy]=1
                 label_map[gx-1,gy-1]=1
                 label_map[gx-1,gy+1]=1
@@ -254,8 +174,6 @@ def plt_trajs(e=1e-4, path_figs='',debug=False):
             sdata='BJ' if data =='Beijing' else data
             if urv=='Usr':urv='User'
             ax.set_xlabel(f'({alpha[ri*3+di]}) {int(float(durate)*100)}% {sdata} {urv}')
-            
-            
     del du,dr
     legend_elements = [
         Patch(facecolor=color_blue, edgecolor=None, label='Dr (the remaining set)',color=None),
@@ -268,16 +186,257 @@ def plt_trajs(e=1e-4, path_figs='',debug=False):
         plt.savefig(path_figs, format='pdf', bbox_inches='tight', dpi=300)
     plt.show()
     plt.close(fig)
-
+def task_metric_data_task__same_model_group(model_group=1,keys=['Du','Dr','Dv'],pt=True): 
+    num_col=len(Datasets)*len(Tasks)*2
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    for col,(metric_group, data,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,urv=Urvs,durate=DuRates)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+    if not pt: return raw,sim,rank,rks
+    print('Retrain',end='')
+    for col,(model_group, data,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        if model_group ==1:
+            if task=='Rec':  print(f'&{tbf(raw[0][col],-1,1)}',end='')
+            else: print(f'&{tbf(raw[0][col],-1,3)}',end='')
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
+    print('\\\\ \\midrule')
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        for i1 in range(2):
+            for i2,data in enumerate(Datasets):
+                for i3,task in enumerate(Tasks):
+                    col=i1*len(Datasets)*len(Tasks)+i2*len(Tasks)+i3
+                    if i1==0:
+                        if task=='Rec':  print(f'&{tbf(raw[1+mi][col],rank[mi][col],1)}',end='')
+                        else:print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+                    rk=rks[col//len(Tasks)]
+                    if col%len(Tasks)==len(Tasks)-1:
+                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+        print('\\\\')
+def task_model_data_task__same_metric_group(metric_group=1,keys=['Du','Dr','Dv'],pt=True):
+    num_col=len(Datasets)*len(Tasks)*2
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    for col,(model_group, data,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,urv=Urvs,durate=DuRates)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+    if not pt: return raw,sim,rank,rks
+    print('Retrain',end='')
+    for col,(model_group, data,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        if model_group ==1:
+            if task=='Rec':  print(f'&{tbf(raw[0][col],-1,1)}',end='')
+            else: print(f'&{tbf(raw[0][col],-1,3)}',end='')
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
+    print('\\\\ \\midrule')
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        for i1 in range(2):
+            for i2,data in enumerate(Datasets):
+                for i3,task in enumerate(Tasks):
+                    col=i1*len(Datasets)*len(Tasks)+i2*len(Tasks)+i3
+                    if i1==0:
+                        if task=='Rec':  print(f'&{tbf(raw[1+mi][col],rank[mi][col],1)}',end='')
+                        else:print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+                    rk=rks[col//len(Tasks)]
+                    if col%len(Tasks)==len(Tasks)-1:
+                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+        print('\\\\')
+def task_model_metric_data_rank(keys=['Du','Dr','Dv'],pt=True): 
+    num_col=len(Datasets)*len(Tasks)*2*2
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    for col,(model_group,metric_group, data,task) in enumerate(zipxs([1,2],[1,2],Datasets,Tasks)):
+        metrics=metricses[model_group-1][metric_group-1]
+        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=metrics,model_group=model_group,urv=Urvs,durate=DuRates)
+        comparison_metric=_comparison_metric(task,model_group,metrics,keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+    if not pt: return raw,sim,rank,rks
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        for rk in rks:
+            print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+        print('\\\\')
+def task__data_task__metric_group__model_group(keys=['Du','Dr','Dv'],pt=True): 
+    num_col=len(Datasets)*len(Tasks)*3
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    col=0
+    model_group=1
+    for col,(metric_group, data,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,urv=Urvs,durate=DuRates)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+    col=len(Datasets)*len(Tasks)*2
+    model_group=2;metric_group=1
+    for _,(data,task) in enumerate(zipxs(Datasets,Tasks)):
+        raw[:,col]=json_item(data=data,mu=MUs,task=task,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,urv=Urvs,durate=DuRates)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+        col+=1
+    if not pt: return raw,sim,rank,rks
+    print('Retrain',end='')
+    for col,(model_group, data,task) in enumerate(zipxs([1,2],Datasets,Tasks)):
+        if model_group ==1:
+            if task=='Rec':  print(f'&{tbf(raw[0][col],-1,1)}',end='')
+            else: print(f'&{tbf(raw[0][col],-1,3)}',end='')
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
+    col=len(Datasets)*len(Tasks)*2
+    for (data,task) in enumerate(zipxs(Datasets,Tasks)):
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
+        col+=1
+    print('\\\\ \\midrule')
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        col=0
+        for i1 in range(2):
+            for i2,data in enumerate(Datasets):
+                for i3,task in enumerate(Tasks):
+                    if i1==0:
+                        if task=='Rec':  print(f'&{tbf(raw[1+mi][col],rank[mi][col],1)}',end='')
+                        else:print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+                    rk=rks[col//len(Tasks)]
+                    if col%len(Tasks)==len(Tasks)-1:
+                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+                    col+=1
+        for i2,data in enumerate(Datasets):
+            for i3,task in enumerate(Tasks):
+                rk=rks[col//len(Tasks)]
+                if col%len(Tasks)==len(Tasks)-1:
+                    print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+                col+=1
+        print('\\\\')
+def views_task_data_urv(keys=['Du','Dr','Dv'],pt=True):
+    num_col=len(Datasets)+len(Tasks)+len(Urvs)
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    model_group,metric_group=1,1
+    col=0
+    for data in Datasets:
+        raw[:,col]=json_item(data=data,mu=MUs,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group)
+        comparison_metric=_comparison_metric(Tasks,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        col+=1
+    for task in Tasks:
+        raw[:,col]=json_item(mu=MUs,task=task,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        col+=1
+    for urv in Urvs:
+        raw[:,col]=json_item(mu=MUs,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,urv=urv)
+        comparison_metric=_comparison_metric(Tasks,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2):sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        col+=1
+    assert col==num_col
+    if not pt: return raw,sim,rank
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        for col in range(num_col):
+            print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+            print(f'&{tbf(rank[mi][col]+1,rank[mi][col],0)}',end='  ')
+        print('\\\\')
+def mia_model_scenario_task(keys=['MIA'],pt=True): 
+    num_col=len(Urvs)*len(Tasks)*2
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    metric_group=1
+    for col,(model_group,urv,task) in enumerate(zipxs([1,2],Urvs,Tasks)):
+        raw[:,col]=json_item(data=Datasets,mu=MUs,task=task,key=keys,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,urv=urv,durate=DuRates)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],keys)
+        for mi,mu in enumerate(mu2): sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+    if not pt: return raw,sim,rank,rks
+    print('Retrain',end='')
+    for col,(model_group,urv,task) in enumerate(zipxs([1,2],Urvs,Tasks)):
+        print(f'&{tbf(raw[0][col],-1,3)}',end='')   
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
+    print('\\\\ \\midrule')
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        for i1 in range(2):
+            for i2,urv in enumerate(Urvs):
+                for i3,task in enumerate(Tasks):
+                    col=i1*len(Urvs)*len(Tasks)+i2*len(Tasks)+i3
+                    print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+                    rk=rks[col//len(Tasks)]
+                    if col%len(Tasks)==len(Tasks)-1:
+                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+        print('\\\\')
+def unlearn_batch(key_task=['Du','Dr','Dv'],key_mia=['MIA'],pt=True):
+    metric_group,model_group=1,1
+    num_col=len(Tasks)*4
+    raw=np.zeros((len(MUs),num_col))
+    sim=np.zeros((len(mu2),num_col))
+    rank=np.zeros((len(mu2),num_col))
+    rks=[]
+    for col,(unlearn_num,is_mia,task) in  enumerate(zipxs([1,2],[0,1],Tasks)):
+        _key=[key_task,key_mia][is_mia]
+        raw[:,col]=json_item(mu=MUs,task=task,key=_key,metrics=metricses[model_group-1][metric_group-1],model_group=model_group,unlearn_batch=unlearn_num)
+        comparison_metric=_comparison_metric(task,model_group,metricses[model_group-1][metric_group-1],_key)
+        for mi,mu in enumerate(mu2): sim[mi,col]=_similarity_score(raw[1+mi,col],raw[0,col],comparison_metric)
+        rank[:,col]=np.argsort(np.argsort(-sim[:,col]))
+        if col%len(Tasks)==len(Tasks)-1: rks.append(np.argsort(np.argsort(-sim[:,col-len(Tasks)+1:col+1].sum(axis=1))))
+    if not pt: return raw,sim,rank,rks
+    print('Retrain',end='')
+    for col,(unlearn_num,is_mia,task) in  enumerate(zipxs([1,2],[0,1],Tasks)):
+        if task=='Rec' and not is_mia:  print(f'&{tbf(raw[0][col],-1,1)}',end='')
+        else: print(f'&{tbf(raw[0][col],-1,3)}',end='')  
+        if col%len(Tasks)==len(Tasks)-1:print('&-',end='')
+    print('\\\\ \\midrule')
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}',end='')
+        for i1,unlearn_num in enumerate([1,2]):
+            for i2,is_mia in enumerate([0,1]):
+                for i3,task in enumerate(Tasks):
+                    col=i1*2*len(Tasks)+i2*len(Tasks)+i3
+                    if task=='Rec' and not is_mia:  print(f'&{tbf(raw[1+mi][col],rank[mi][col],1)}',end='')
+                    else:print(f'&{tbf(raw[1+mi][col],rank[mi][col],3)}',end='')
+                    rk=rks[col//len(Tasks)]
+                    if col%len(Tasks)==len(Tasks)-1:
+                        print(f'&{tbf(rk[mi]+1,rk[mi],0)}',end='  ')
+        print('\\\\')
+def speed_up(pt=True): 
+    sp_time=np.zeros((len(mu2),4))
+    rk_time=np.zeros((len(mu2),4),dtype=int)
+    for ti,task in enumerate(Tasks):
+        gt_time=json_item(mu='Retrain',task=task,key='time')
+        time=json_item(task=task,key='time')
+        sp_time[:,ti]=gt_time/time
+        rk_time[:,ti]=np.argsort(np.argsort(-sp_time[:,ti]))
+    sum_rk_time=rk_time.sum(axis=1)
+    sum_rk_time=np.argsort(np.argsort(sum_rk_time))
+    for mi,mu in enumerate(mu2):
+        print(f'{mu}&',end='')
+        for ti,task in enumerate(Tasks): print(f'{tbf(sp_time[mi,ti],rk_time[mi,ti],0)}&',end='')
+        print(f'{tbf(sum_rk_time[mi]+1,sum_rk_time[mi],0)}\\\\')
 if __name__=='__main__':
-    plt_trajs(path_figs='./urv.pdf')
-
-    task_cityurv_raw_simsort('Sim'); print('\n')
-    task_cityurv_raw_simsort('Simp'); print('\n')
-    task_cityurv_raw_simsort('Map'); print('\n')
-    task_cityurv_raw_simsort('Rec'); print('\n')
-    all_tasks_rank_times_rank(); print('\n')
-    
-    ana_metric_city_task(); print('\n') 
-    ana_urv_mia(); print('\n')
-    
+    pass
+    task_metric_data_task__same_model_group(model_group=1); print('\n') 
+    task_metric_data_task__same_model_group(model_group=2); print('\n') 

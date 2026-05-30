@@ -17,7 +17,6 @@ class Origin(MU):
         return self.model_origin()
 
 mu_methods={
-    'Origin':Origin,
     'Retrain':Retrain,
     'FineTune':FineTune,
     'TopK':TopK,
@@ -29,4 +28,3 @@ mu_methods={
     'GDRGMA':GDRGMA,
     'SSD':SSD,
 }
-

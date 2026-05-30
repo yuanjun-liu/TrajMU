@@ -11,8 +11,6 @@ import numpy as np
 from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
-
-
 class SSD(MU):
     """AAAI24 no train"""
     def __init__(self, **kw):
@@ -76,7 +74,8 @@ class SSD(MU):
                 if k not in forget_importance:continue
                 oimp,fimp=original_importance[k],forget_importance[k]
                 oimp_norm = oimp.mul(self.selection_weighting)
-                locations = torch.where(fimp > oimp_norm)
+                locations = torch.where(fimp > oimp_norm,)
+                if locations[0].numel() == 0:continue
                 weight = ((oimp.mul(self.dampening_constant)).div(fimp)).pow(
                     self.exponent
                 )
@@ -89,4 +88,3 @@ class SSD(MU):
         imp_du=self.calc_importance(DataLoader(self.du,self.bs,num_workers=num_workers,collate_fn=self.model.get_collate_fn()))
         self.modify_weight(imp_ds,imp_du)
         return self.model
-

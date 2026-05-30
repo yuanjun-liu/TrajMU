@@ -4,18 +4,55 @@ from _nn.nData import auto_device
 from _tool.mFile import out_dir,check_dir
 from _tool.mIO import load_pk,save_pk
 from _tool.mList import deep_flatten2
-from _nn.nBasic import to_device,loss_reduce
+from _nn.nBasic import to_device,loss_reduce,call_estop_fn
 from _nn.nBasic import basic_train
-from _tool.mList import deep_copy as deepcopy
 import torch,os
+from torch import Tensor
 from torch import nn
 from torch.nn.modules import Module
 from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Subset
 from torch.utils.data.dataloader import DataLoader
 import time
+import numpy as np
+from copy import deepcopy
+from contextlib import contextmanager
 from _tool.SysMonitor import mPrintCapturer
-DEBUG=False
 num_workers=0
+def _subset_data(data, idx):
+    idx=[int(i) for i in idx]
+    if data is None:
+        return None
+    if isinstance(data, np.ndarray):
+        return data[idx]
+    if isinstance(data, list):
+        return [data[i] for i in idx]
+    if isinstance(data, tuple):
+        return tuple(data[i] for i in idx)
+    try:
+        return data[idx]
+    except Exception:
+        return Subset(data, idx)
+def _concat_data(*parts):
+    parts=[p for p in parts if p is not None]
+    if len(parts)==0:
+        return None
+    if len(parts)==1:
+        return parts[0]
+    head=parts[0]
+    if isinstance(head, np.ndarray):
+        return np.concatenate(parts,axis=0)
+    if isinstance(head, list):
+        res=[]
+        for p in parts:
+            res.extend(list(p))
+        return res
+    if isinstance(head, tuple):
+        res=[]
+        for p in parts:
+            res.extend(list(p))
+        return tuple(res)
+    return ConcatDataset(list(parts))
 def dict2vec(d):
     res=[]
     for name in d:
@@ -96,9 +133,16 @@ class TaskModel(nn.Module):
         self.device=device ; self.root_data=self.root_model=None;self.data_name=data_name
         self.model:nn.Module=None ; self.du_rate=du_rate ; self.root_map=None
         self.dr=self.du=self.dv=None ; self.bs=None ; self.urv=urv
-    def data_init(self,uvr,rt_if_exist=False):
+    def data_init(self,urv,rt_if_exist=False):
         """{dr,du,dv,dtrain,dtest,dval,dr_raw,du_raw} + (optinal) {dr_eval,du_eval,dr_eval} """
         raise NotImplementedError()
+    def call_gen_noise(self,num,requires_grad=True):
+        """num item"""
+        raise NotImplementedError()
+    def call_add_noise(self,x,noise):
+        """batched"""
+        raise NotImplementedError()
+        return [a+b for a,b in zip(x,noise)]
     def get_collate_fn(self): 
         return None
     def get_collate_fn_test(self): 
@@ -148,16 +192,20 @@ class TaskModel(nn.Module):
     def call_opt_sch(self,**opt_kw):
         opt=self._call_new_opt(**opt_kw)
         return opt,self._call_new_sch(opt)
-    def lossDistill(self,teacher,student):
+    def lossDistill(self,teacher:Tensor,student:Tensor):
         if isinstance(teacher,dict):
             return sum([self.lossDistill(teacher[k],student[k]) for k in teacher])
         if isinstance(teacher,list) or isinstance(teacher,tuple):
             return sum([self.lossDistill(t,s) for t,s in zip(teacher,student)])
+        if not (student.requires_grad or teacher.requires_grad):return 0
         return self.lossFdist(teacher,student)
     def _lossF_dist_cls(self,t,s): 
         T=1
         return nn.functional.kl_div(torch.log_softmax(s / T, dim=1),torch.softmax(t / T, dim=1),reduction='batchmean')*T*T 
-    def _lossF_dist_vec(self,t,s):
+    def _lossF_dist_vec(self,t:Tensor,s:Tensor):
+        if t.dtype == torch.long or s.dtype == torch.long:return 0
+        if t.dtype == torch.bool or s.dtype == torch.bool:return 0
+        if len(t.shape)==0 and len(s.shape)==0:return 0
         return torch.norm(t-s,dim=1).mean() - nn.functional.cosine_similarity(t, s, dim=1).mean()
 class DataInitFinishExp(Exception):
     def __init__(self, message=''):
@@ -166,10 +214,11 @@ class DataInitFinishExp(Exception):
     def __str__(self):
         return self.message
 class MU:
-    def __init__(self, model:TaskModel=None,bs=256, epoch_tune=1, epoch_train=None, device=auto_device(), data_name='', train_test_step=100, dudvdr_type=None, du_rate=None,save_each_epoch=False, **kw):
+    def __init__(self, model:TaskModel=None,bs=256, epoch_tune=1, epoch_train=None, device=auto_device(), data_name='', train_test_step=100, dudvdr_type=None, du_rate=None,save_each_epoch=False, unlearn_num=1, **kw):
         self.kw=kw; self.device=auto_device(); self.time=-1; self.du_rate=du_rate; self.__dict__.update(kw) 
         self.model:TaskModel=model; self.data_name=data_name ;self.urv=dudvdr_type
         self.epoch_tune=epoch_tune; self.epoch_train=epoch_train; self.bs=bs; self.train_test_step=train_test_step
+        self.unlearn_num=unlearn_num
         self.dr=self.du=self.dv=self.dtrain=self.dtest=self.dval=None;self.dudvdr_type=dudvdr_type
         self.dr_raw=self.du_raw=None 
         self.dr_eval=self.du_eval=self.dv_eval=None 
@@ -199,7 +248,8 @@ class MU:
         """path of model, path of time"""
         return os.path.join(self.root_init(),'Retrain',f'{self.urv}.th.zst'),os.path.join(self.root_init(),'Retrain',f'{self.urv}.time.pk')
     def root_mu(self): 
-        path= os.path.join(self.root_data_task(),self.mu_name())
+        suffix='' if self.unlearn_num==1 else f'-u{self.unlearn_num}'
+        path= os.path.join(self.root_data_task(),self.mu_name()+suffix)
         check_dir(path+os.sep)
         return path
     def path_unlearn(self,ep=None): 
@@ -222,7 +272,6 @@ class MU:
         except DataInitFinishExp as e: 
             x=self.model.data_init(self.dudvdr_type,rt_if_exist=rt_if_exist)
         if rt_if_exist:return x
-        x=self.model.data_init(self.dudvdr_type,rt_if_exist=False)
         self.dr=x['dr'];self.du=x['du'];self.dv=x['dv'];self.dtrain=x['dtrain'];self.dval=x['dval'];self.dtest=x['dtest']
         self.du_raw=x['du_raw'];self.dr_raw=x['dr_raw']
         assert len(self.du)==len(self.du_raw) and len(self.dr)==len(self.dr_raw) 
@@ -272,6 +321,35 @@ class MU:
     def _unlearn(self,*args,**kw):
         """return: model"""
         raise NotImplementedError()
+    @contextmanager
+    def _wrap_unlearn_sets(self,dr,du,dr_raw=None,du_raw=None):
+        bak=(self.dr,self.du,self.dr_raw,self.du_raw,self.model.dr,self.model.du)
+        self.dr,self.du=dr,du
+        self.dr_raw,self.du_raw=dr_raw,du_raw
+        self.model.dr,self.model.du=dr,du
+        try:
+            yield
+        finally:
+            self.dr,self.du,self.dr_raw,self.du_raw,self.model.dr,self.model.du=bak
+    def _split_du_for_unlearn2(self):
+        num=len(self.du)
+        if num<2:
+            raise ValueError('unlearn2 requires len(du)>=2')
+        idx=np.arange(num,dtype=int)
+        idx1,idx2=np.array_split(np.random.default_rng(42).permutation(idx),2)
+        idx1=np.sort(idx1).astype(int)
+        idx2=np.sort(idx2).astype(int)
+        du1=_subset_data(self.du,idx1)
+        du2=_subset_data(self.du,idx2)
+        du_raw1=_subset_data(self.du_raw,idx1)
+        du_raw2=_subset_data(self.du_raw,idx2)
+        dr1=_concat_data(self.dr,du2)
+        dr_raw1=_concat_data(self.dr_raw,du_raw2)
+        return {
+            'du1':du1,'du2':du2,
+            'du_raw1':du_raw1,'du_raw2':du_raw2,
+            'dr1':dr1,'dr_raw1':dr_raw1,
+        }
     def unlearn(self,*args,rerun=False,ptloss=False,**kw):
         path_model2,path_time2=self.path_unlearn(self.epoch_tune) 
         if not rerun and os.path.exists(path_model2): 
@@ -293,6 +371,40 @@ class MU:
         elif 'Retrain' in self.mu_name():self.time=load_pk(self.path_retrain()[1])
         elif self.save_each_epoch:
             self.save_epoch(self.epoch_tune) 
+        else:
+            self.time=t2-t1
+            save_pk(path_time,self.time)
+            self.model.save(path_model)
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+        if torch.mps.is_available(): torch.mps.empty_cache()
+        return self.model
+    def unlearn2(self,*args,rerun=False,ptloss=False,**kw):
+        path_model2,path_time2=self.path_unlearn(self.epoch_tune)
+        if not rerun and os.path.exists(path_model2):
+            self.model.load(path_model2)
+            if os.path.exists(path_time2): self.time=load_pk(path_time2)
+            return self.model
+        path_model,path_time=self.path_unlearn()
+        if not rerun and os.path.exists(path_model):
+            self.model.load(path_model)
+            if os.path.exists(path_time): self.time=load_pk(path_time)
+            return self.model
+        if len(self.du)<2:
+            return self.unlearn(*args,rerun=rerun,ptloss=ptloss,**kw)
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
+        if torch.mps.is_available(): torch.mps.empty_cache()
+        self.model.train()
+        split=self._split_du_for_unlearn2()
+        t1=time.time();self._last_time=t1
+        with self._wrap_unlearn_sets(split['dr1'],split['du1'],split['dr_raw1'],split['du_raw1']):
+            self.model=self._unlearn(*args,ptloss=ptloss,**kw)
+        with self._wrap_unlearn_sets(self.dr,split['du2'],self.dr_raw,split['du_raw2']):
+            self.model=self._unlearn(*args,ptloss=ptloss,**kw)
+        t2=time.time()
+        if 'Origin' in self.mu_name():self.time=load_pk(self.path_origin()[1])
+        elif 'Retrain' in self.mu_name():self.time=load_pk(self.path_retrain()[1])
+        elif self.save_each_epoch:
+            self.save_epoch(self.epoch_tune)
         else:
             self.time=t2-t1
             save_pk(path_time,self.time)

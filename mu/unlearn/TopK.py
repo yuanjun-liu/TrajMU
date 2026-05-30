@@ -11,9 +11,6 @@ import numpy as np
 from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
-
-
-
 class TopK(MU):
     """modify k% paramter, tune. tkde25 Machine Unlearning Through Fine-Grained Model Parameters Perturbation"""
     def __init__(self,**kw):
@@ -23,7 +20,7 @@ class TopK(MU):
         return super().mu_name() +f'{self.k}_{self.noise_range}'
     def _unlearn(self,*arg,ptloss=False,estop_fn=None,**kw):
         ori_model=deepcopy(self.model)
-        ori_model.eval() ; ori_model.requires_grad_(False)
+        ori_model.train() ; ori_model.requires_grad_(False)
         opt,sch=self.model.call_opt_sch()
         du_loader=DataLoader(self.du,self.bs,True,num_workers=num_workers,collate_fn=self.model.get_collate_fn())
         dr_loader=DataLoader(self.dr,self.bs,True,num_workers=num_workers,collate_fn=self.model.get_collate_fn())
@@ -71,4 +68,3 @@ class TopK(MU):
                 if ep>=1 and estop_fn is not None and estop_fn(loss.item()):return self.model
             self.save_epoch(ep+1)
         return self.model
-

@@ -6,7 +6,6 @@ from mu.traj.loaddata import load_traj_raw,ts_split
 from traj.data.load_trajs import traj_bbox,traj_tbox
 from mu.traj.mia_lstm import MIA as MIA3
 from traj.sim.measures import ITS
-
 fix_traj_len={'Porto':500,'Beijing':110,'Xian':400}
 cr={'Porto':0.01,'Beijing':0.05,'Xian':0.01}
 def _data_pre(data,root,fix_traj_len):
@@ -73,7 +72,6 @@ class TrajSimp(TaskModel):
         self._dtrain=_dtrain;self._dr=_dr;self._du=_du;self._dv=_dv;self.du_idx=du_idx
         dr_raw=self._dr;du_raw=self._du
         return {'dr':dr,'du':du,'dv':dv,'dtrain':dtrain,'dtest':dtest,'dval':dval,'dr_raw':dr_raw,'du_raw':du_raw}
-
     def get_collate_fn(self): 
         return GraphSimpcollate
     def _call_new_model(self):
@@ -109,10 +107,10 @@ class TrajSimp(TaskModel):
         simp_trajs_idx=None
         diff_trajs_idx=None
         load_model=False
-        for i in range(1 if DEBUG else 9): 
-            simp_trajs_idx = train_graphsimp(graph_train_dataset, gnn_path, diff_trajs_idx,load_model,DEBUG=DEBUG)
+        for i in range(9):
+            simp_trajs_idx = train_graphsimp(graph_train_dataset, gnn_path, diff_trajs_idx,load_model)
             simp,diff=get_model_diffusimp(simp_path,diff_path,load_model)
-            diff_trajs_idx = train_diffusimp(ts,self.bbox, simp_trajs_idx,simp,diff,simp_path,diff_path,DEBUG=DEBUG)
+            diff_trajs_idx = train_diffusimp(ts,self.bbox, simp_trajs_idx,simp,diff,simp_path,diff_path)
             load_model=True
         t2=time.time()
         saveZ_pk(tim_path,t2-t1)
@@ -260,4 +258,3 @@ class TrajSimp(TaskModel):
                 'ITS_wQ_Du':ITSE(self._du,simpQ_ts_du),'ITS_wQ_Dr':ITSE(self._dr,simpQ_ts_dr),'ITS_wQ_Dv':ITSE(self._dv,simpQ_ts_dv),
                 }
         return res
-    

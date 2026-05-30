@@ -1187,7 +1187,7 @@ class GAT(nn.Module):
 def GraphSimpcollate(batch):
     batch = list(zip(*batch))
     return batch
-def train_graphsimp(train_dataset:GraphSimpDataset, gnn_path,simp_trajs_idx=None,load_model=False,DEBUG=False):
+def train_graphsimp(train_dataset:GraphSimpDataset, gnn_path,simp_trajs_idx=None,load_model=False):
     model = GAT().to(device)
     batch_size = 64
     if simp_trajs_idx!=None:
@@ -1197,7 +1197,7 @@ def train_graphsimp(train_dataset:GraphSimpDataset, gnn_path,simp_trajs_idx=None
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4,weight_decay=0)
     dataloader = DataLoader(dataset=train_dataset,batch_size=batch_size,shuffle=True,collate_fn=GraphSimpcollate)
     cnt = 0
-    for epoch in range( 1 if DEBUG else 20 ):
+    for epoch in range(20):
         for batch in dataloader:
             model.train()
             optimizer.zero_grad()
@@ -1674,13 +1674,13 @@ def get_model_diffusimp(simp_path='',diff_path='', load_model=True)->Tuple[SimpT
         if simp_path and os.path.exists(simp_path): model.load_state_dict(loadZ_th(simp_path))
         if diff_path and os.path.exists(diff_path): diffusion.load_state_dict(loadZ_th(diff_path))
     return model,diffusion
-def train_diffusimp(trajs,bbox, simp_trajs_idx, model:SimpTransformer, diffusion:SpacedDiffusion, simp_path='',diff_path='',DEBUG=False):
+def train_diffusimp(trajs,bbox, simp_trajs_idx, model:SimpTransformer, diffusion:SpacedDiffusion, simp_path='',diff_path=''):
     [x_min,x_max],[y_min,y_max]=bbox[:2]
     batch_size = 64 ; amplify_len  = 20
     train_set = DiffuSimpDataset(trajs,simp_trajs_idx)
     dataloader = DataLoader(train_set, batch_size=batch_size,shuffle=True,collate_fn=partial(DiffuSimpcollate, x_max=x_max, y_max=y_max, x_min=x_min, y_min=y_min,device=device))
     schedule_sampler = create_named_schedule_sampler('uniform', diffusion)
-    TrainLoop( model=model, diffusion=diffusion, dataloader=dataloader, lr=1e-4, ema_rate= "0.9990", log_interval= 50, save_interval= 5000, resume_checkpoint= "", use_fp16= False, fp16_scale_growth= 1e-3, schedule_sampler= schedule_sampler, weight_decay= 0, lr_anneal_steps= 0, checkpoint_path=[simp_path,diff_path], gradient_clipping=-1.0, eval_interval=2000, epochs=(1 if DEBUG else 20), 
+    TrainLoop( model=model, diffusion=diffusion, dataloader=dataloader, lr=1e-4, ema_rate= "0.9990", log_interval= 50, save_interval= 5000, resume_checkpoint= "", use_fp16= False, fp16_scale_growth= 1e-3, schedule_sampler= schedule_sampler, weight_decay= 0, lr_anneal_steps= 0, checkpoint_path=[simp_path,diff_path], gradient_clipping=-1.0, eval_interval=2000, epochs=20,
     ).run_loop()
     model.eval()
     dataloader_eval = DataLoader(train_set, batch_size=batch_size, shuffle=False, collate_fn=partial(DiffuSimpcollate, x_max=x_max, y_max=y_max, x_min=x_min, y_min=y_min, device=device))
@@ -1744,7 +1744,6 @@ def api_mlsimp_train(root_model,root_data=None,ts_name=None,ts_train=None,bbox=N
 def init_query_param(dataset, q_type,distri): 
     t={'Porto':60*60*24*7,'Beijing':1237764824,'Xian':60*60*6,} 
     return 0.02,0.02, t[dataset]
-
 class Rtree():
     def __init__(self, *args):
         self.p = rtreeIndex.Property()
@@ -2258,7 +2257,6 @@ def line_segment_clustering(traj_segments, epsilon: float = 2.0, min_lines: int 
     cluster_number = len(cluster_dict)
     for i in range(0, cluster_number):
         traj_num = len(set(map(lambda s: s.traj_id, cluster_dict[i])))
-        
         if traj_num < min_traj_cluster:
             remove_cluster[i] = cluster_dict.pop(i)
     return cluster_dict, remove_cluster

@@ -2,7 +2,7 @@ exec("import sys \nif __name__=='__main__':  sys.path.extend(['./'])")
 import os
 from traj.models.one_blue import *
 from mu.traj.loaddata import datasets,t_add_noise,load_traj_raw,ts_split,fix_trajs_num
-from mu.MU import TaskModel,DEBUG,DataInitFinishExp
+from mu.MU import TaskModel,DataInitFinishExp
 from traj.data.load_trajs import traj_bbox
 from traj.data.process_ts import t_len
 from _tool.mIO import loadZ_pk,saveZ_pk,load_pk
@@ -47,9 +47,6 @@ def _data_init(dataname,dataroot,urv,durate,rt_if_exist):
     if os.path.exists(path):
         if rt_if_exist:return True
         dr,du,dv,dtrain,dtest,dval,du_noise,dr_noise,dv_noise,num_cls=loadZ_pk(path)
-        if DEBUG:
-            dtrain,dval,dtest,du,dr,dv=dtrain[:1000],dval[:100],dtest[:100],du[:800],dr[:200],dv[:200]
-            dv_noise=dv_noise[:200];dr_noise=dr_noise[:200];du_noise=du_noise[:800]
         return dr,du,dv,dtrain,dtest,dval,du_noise,dr_noise,dv_noise,num_cls+1
     TS,UIDS=_data_pre(dataname,dataroot.replace(str(durate),'').replace('init',''))
     ts=TS ; lb=UIDS
@@ -67,7 +64,6 @@ def _data_init(dataname,dataroot,urv,durate,rt_if_exist):
     dv_noise=preprocess( np.array([t_add_noise(t) for t in  ts[dv_idx]],dtype=object),lb[dv_idx])
     saveZ_pk(path,[dr,du,dv,dtrain,dtest,dval,du_noise,dr_noise,dv_noise,num_cls])
     print('build data over, please re-run');raise DataInitFinishExp()
-
 class TrajSim(TaskModel): 
     def __init__(self, bs=256,**kw):
         super().__init__(**kw)

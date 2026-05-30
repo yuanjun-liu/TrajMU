@@ -11,9 +11,6 @@ import numpy as np
 from _tool.mList import topk
 from _tool.mData import deepcopy
 from _nn.nBasic import to_device
-
-
-
 class _GDRGMA_MemoryBank:
     def __init__(self, size):
         self.grads = []    
@@ -95,4 +92,3 @@ class GDRGMA(MU):
                 if sch:sch.step(self.epoch_train)
             self.save_epoch(ep+1)
         return self.model
-

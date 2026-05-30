@@ -1,6 +1,8 @@
 exec("import sys \nif __name__=='__main__':  sys.path.extend(['./'])")
 from traj.models.one_trmma import *
+from traj.models.one_trmma import _mma_get_results
 from mu.MU import *
+import time
 from mu.traj.loaddata import ts_split_area,ts_split_usr,train_rate,fix_trajs_num
 from _nn.nFile import load_weight_mem,save_weight_mem
 from rtree import Rtree
@@ -26,6 +28,21 @@ def _map_pre(data_name,root_map):
     rn = RoadNetworkMapFull(os.path.join(root_map,'map'), zone_range=zone_range, unit_length=50)
     saveZ_pk(path_map,rn)
     return rn
+def _trajrec_cache_path(root:str, name:str):
+    return os.path.join(root, f'{name}.pk.zst')
+def _map_cache_path(root: str, name: str):
+    return os.path.join(root, f'{name}.pk.zst')
+def map_profile_enabled():
+    return os.environ.get('MU_MAP_PROFILE', '0').lower() in ['1', 'true', 'yes', 'on']
+def map_profile_add(stats: dict, enabled: bool, name: str, cost: float):
+    if not enabled:
+        return
+    stats[name] = stats.get(name, 0.0) + float(cost)
+def map_profile_report(stats: dict, enabled: bool, title: str):
+    if not enabled or not stats:
+        return
+    msg = ', '.join([f'{k}={stats[k]:.3f}s' for k in sorted(stats)])
+    print(f'[MAP-PROFILE] {title}: {msg}')
 class TrajMap(TaskModel):
     def __init__(self,**kw):
         super().__init__(**kw)
@@ -34,6 +51,8 @@ class TrajMap(TaskModel):
         self._train_best_val_loss=float('inf');self._train_stop_count=0
         self._loss=nn.BCELoss(reduction='mean')
         self._train_weight=None
+        self._profile_enabled = map_profile_enabled()
+        self._profile_stats = {}
     def data_init(self,urv,rt_if_exist=False):
         """dr,du,dv,dtrain,dtest,dval,dr_raw,du_raw"""
         tvt_urv_root = self.root_data+f'-{urv}'
@@ -44,20 +63,73 @@ class TrajMap(TaskModel):
         args,mbr=mma_args(self.data_name,rn)
         dtrain,dval,dtest,du,dr,dv,du_raw,dr_raw,dv_raw=x
         assert len(dr)>5 and len(dv)>5 and len(du)>5 and len(dtrain)>5 and len(dval)>5
-        dtrain=GPS2SegData(rn,dtrain,mbr,args,'train',True)
-        dr=GPS2SegData(rn,dr,mbr,args,'dr',True)
-        du=GPS2SegData(rn,du,mbr,args,'du',True)
-        dv=GPS2SegData(rn,dv,mbr,args,'dv',True)
-        dval=GPS2SegData(rn,dval,mbr,args,'valid',False)
-        assert len(dr)>5 and len(dv)>5 and len(du)>5 and len(dtrain)>5 and len(dval)>5
-        dr,du,dv,dtrain,dval,dr_raw,du_raw=fix_trajs_num({k:v for k,v in zip('dr,du,dv,dtrain,dval,dr_raw,du_raw'.split(','),[dr,du,dv,dtrain,dval,dr_raw,du_raw])},self.du_rate,slice_fn).values()
-        if DEBUG: dtrain=slice_fn(dtrain,1000);dval=slice_fn(dval,100);du=slice_fn(du,800);dr=slice_fn(dr,200);dv=slice_fn(dv,200)
+        dr,du,dv,dtrain,dval,dr_raw,du_raw=fix_trajs_num(
+            {k:v for k,v in zip('dr,du,dv,dtrain,dval,dr_raw,du_raw'.split(','),[dr,du,dv,dtrain,dval,dr_raw,du_raw])},
+            self.du_rate,
+            slice_fn,
+        ).values()
+        t_cache = time.time()
+        dtrain=cache_gps2seg_dataset(GPS2SegData(rn,dtrain,mbr,args,'train',True), _map_cache_path(tvt_urv_root, 'gps2seg-basecand-v2-train'))
+        dr=cache_gps2seg_dataset(GPS2SegData(rn,dr,mbr,args,'dr',True), _map_cache_path(tvt_urv_root, 'gps2seg-basecand-v2-dr'))
+        du=cache_gps2seg_dataset(GPS2SegData(rn,du,mbr,args,'du',True), _map_cache_path(tvt_urv_root, 'gps2seg-basecand-v2-du'))
+        dv=cache_gps2seg_dataset(GPS2SegData(rn,dv,mbr,args,'dv',True), _map_cache_path(tvt_urv_root, 'gps2seg-basecand-v2-dv'))
+        dval=cache_gps2seg_dataset(GPS2SegData(rn,dval,mbr,args,'valid',False), _map_cache_path(tvt_urv_root, 'gps2seg-basecand-v2-valid'))
+        map_profile_add(self._profile_stats, self._profile_enabled, 'data_cache_build', time.time() - t_cache)
         assert len(dr)>5 and len(dv)>5 and len(du)>5 and len(dtrain)>5 and len(dval)>5
         self.dtrain=dtrain;self.dr=dr;self.du=du
         self.dval=dval;self.args=args
         assert len(du)==len(du_raw) and len(dr)==len(dr_raw) 
+        map_profile_report(self._profile_stats, self._profile_enabled, f'TrajMap.data_init.{urv}')
         return {'dr':dr,'du':du,'dv':dv,'dtrain':dtrain,'dtest':None,'dval':dval,'dr_raw':dr_raw,'du_raw':du_raw}
-
+    def _infer_split(self, dataset, need_probs=True, need_results=True, profile_prefix='infer'):
+        dataset.is_train=False
+        self.model.eval()
+        loader=DataLoader(dataset,self.args['batch_size'],num_workers=num_workers,collate_fn=self.get_collate_fn())
+        outputs=[] if need_probs else None
+        results=[] if need_results else None
+        it=iter(loader)
+        while True:
+            t_fetch=time.time()
+            try:
+                batch=next(it)
+            except StopIteration:
+                break
+            map_profile_add(self._profile_stats, self._profile_enabled, f'{profile_prefix}_fetch', time.time()-t_fetch)
+            t_forward=time.time()
+            with torch.no_grad():
+                src_seqs, src_lengths, trg_rids, _, candi_ids, candi_feats, candi_masks = batch
+                src_seqs = src_seqs.to(device, non_blocking=True)
+                candi_ids = candi_ids.to(device, non_blocking=True)
+                candi_feats = candi_feats.to(device, non_blocking=True)
+                candi_masks = candi_masks.to(device, non_blocking=True)
+                output_ids = self.model(src_seqs, src_lengths, candi_ids, candi_feats, candi_masks)
+            map_profile_add(self._profile_stats, self._profile_enabled, f'{profile_prefix}_forward', time.time()-t_forward)
+            if need_probs:
+                outputs.append(output_ids.detach().cpu())
+            if need_results:
+                candi_size = candi_ids.shape[-1]
+                output_tmp = (F.one_hot(output_ids.argmax(-1), candi_size) * candi_ids).sum(dim=-1) - 1
+                results.extend(_mma_get_results(output_tmp, trg_rids, src_lengths))
+        return outputs, results
+    def call_gen_noise(self,num,requires_grad=True):
+        """same as iter(loader)"""
+        res=[]
+        for i in np.random.choice(len(self.dr),num):
+            res.append(self.dr[i])
+        x=self.get_collate_fn()(res)
+        x[1]= torch.randn_like(x[1],requires_grad=requires_grad,device=device)
+        x[3]= torch.randn_like(x[3],requires_grad=requires_grad,device=device)
+        x[6]= torch.randn_like(x[6],requires_grad=requires_grad,device=device)
+        x[11]=torch.randn_like(x[11],requires_grad=requires_grad,device=device)
+        x[13]=torch.randn_like(x[13],requires_grad=requires_grad,device=device)
+        return x
+    def call_add_noise(self,x,noise):
+        x[1]= x[1]+noise[1]
+        x[3]= x[3]+noise[3]
+        x[6]= x[6]+noise[6]
+        x[11]=x[11]+noise[11]
+        x[13]=x[13]+noise[13]
+        return x
     def get_collate_fn(self): 
         return mma_collate_fn
     def _call_new_model(self):
@@ -76,10 +148,12 @@ class TrajMap(TaskModel):
         return self._lossF_dist_cls(teacher,student)
     def train_after_epoch(self)->bool:
         """return: if exit train"""
+        t_valid=time.time()
         dval_loader=DataLoader(self.dval,self.args['batch_size'],num_workers=num_workers,collate_fn=self.get_collate_fn())
         self.model.eval()
         valid_id_loss = mma_evaluate(self.model,dval_loader , device)
         self.model.train()
+        map_profile_add(self._profile_stats, self._profile_enabled, 'validation_total', time.time()-t_valid)
         if valid_id_loss < self._train_best_val_loss:
             self._train_best_val_loss = valid_id_loss
             self._train_weight=save_weight_mem(self.model)
@@ -91,6 +165,7 @@ class TrajMap(TaskModel):
         if self._train_stop_count >= 5:
             print("==> [Info] Early Stop.")
             load_weight_mem(self.model, self._train_weight)
+            map_profile_report(self._profile_stats, self._profile_enabled, 'TrajMap.train')
             return True
     def get_task_metrics(self): 
         self.du.is_train=self.dv.is_train=self.dr.is_train=False
@@ -99,16 +174,11 @@ class TrajMap(TaskModel):
             return torch.softmax(y[:,0,:],dim=-1)
         def mia_call4(y:torch.Tensor,x): 
             return torch.softmax(y.sort(dim=-1)[0].mean(dim=1),dim=-1) 
-        def acc_f1(du,name): 
+        def acc_f1(pred_data,name):
             path_res=os.path.join(self.root_model,f'mma-{self.urv}-{name}.pk.zst') ; check_dir(path_res)
-            if 'Origin' in path_res:
-                if os.path.exists(path_res):
-                    pred_data=loadZ_pk(path_res)
-                else:
-                    pred_data = mma_infer(self.model, du, device)
-                    print('save ',path_res) 
-                    saveZ_pk(path_res,pred_data)
-            else: pred_data = mma_infer(self.model, du, device)
+            if 'Origin' in path_res and not os.path.exists(path_res):
+                print('save ',path_res)
+                saveZ_pk(path_res,pred_data)
             epoch_id1_loss = []
             epoch_recall_loss = []
             epoch_precision_loss = []
@@ -121,20 +191,24 @@ class TrajMap(TaskModel):
                 epoch_f1_loss.append(rid_f1)
             test_id_acc, test_id_recall, test_id_precision, test_id_f1 = np.mean(epoch_id1_loss), np.mean(epoch_recall_loss), np.mean(epoch_precision_loss), np.mean(epoch_f1_loss)
             return {'acc':test_id_acc.item(),'f1':test_id_f1.item()}
-        dv_loader=DataLoader(self.dv,self.args['batch_size'],num_workers=num_workers,collate_fn=self.get_collate_fn())
-        dr_loader=DataLoader(self.dr,self.args['batch_size'],num_workers=num_workers,collate_fn=self.get_collate_fn())
-        du_loader=DataLoader(self.du,self.args['batch_size'],num_workers=num_workers,collate_fn=self.get_collate_fn())
-        out_dr=basic_infer(self,dr_loader);out_du=basic_infer(self,du_loader);out_dv=basic_infer(self,dv_loader)
+        t_metrics=time.time()
+        out_dr,res_dr_pred=self._infer_split(self.dr, need_probs=True, need_results=True, profile_prefix='metrics_dr')
+        out_du,res_du_pred=self._infer_split(self.du, need_probs=True, need_results=True, profile_prefix='metrics_du')
+        out_dv,res_dv_pred=self._infer_split(self.dv, need_probs=True, need_results=True, profile_prefix='metrics_dv')
         mia5=MIA4([x.reshape(-1,10) for x in out_dr],[x.reshape(-1,10) for x in out_dv],[x.reshape(-1,10) for x in out_du])
         mia4=MIA4([mia_call4(y,0) for y in out_dr],[mia_call4(y,0) for y in out_dv],[mia_call4(y,0) for y in out_du])
-        res_du=acc_f1(du_loader,'du') ; res_dr=acc_f1(dr_loader,'dr') ; res_dv=acc_f1(dv_loader,'dv')
+        res_du=acc_f1(res_du_pred,'du') ; res_dr=acc_f1(res_dr_pred,'dr') ; res_dv=acc_f1(res_dv_pred,'dv')
+        map_profile_add(self._profile_stats, self._profile_enabled, 'final_metrics_total', time.time()-t_metrics)
+        map_profile_report(self._profile_stats, self._profile_enabled, 'TrajMap.metrics')
+        def mean_call(y:torch.Tensor):
+            return y.mean(dim=1).numpy()
         return {
-            'MIA':'','mia_call':mia_call, 
                 'MIA4':mia4, 
                 'MIA5':mia5, 
                 'F1_Du':res_du['f1'],'F1_Dr':res_dr['f1'],'F1_Dv':res_dv['f1'],
                 'Acc_Du':res_du['acc'],'Acc_Dr':res_dr['acc'],'Acc_Dv':res_dv['acc'],
                 }
+
 class TrajRec(TaskModel):
     def __init__(self,**kw):
         super().__init__( **kw)
@@ -156,24 +230,36 @@ class TrajRec(TaskModel):
         dtrain,dval,dtest,_odu,_odr,_odv,du_raw,dr_raw,dv_raw=x
         args,mbr=trmma_arg(self.root_map,rn,self.data_name)
         dtrain,dval,_odu,_odr,_odv,du_raw,dr_raw,dv_raw=fix_trajs_num({k:v for k,v in zip('dtrain,dval,_odu,_odr,_odv,du_raw,dr_raw,dv_raw'.split(','),[dtrain,dval,_odu,_odr,_odv,du_raw,dr_raw,dv_raw])},self.du_rate,slice_fn).values()
-        if DEBUG: dtrain=slice_fn(dtrain,1000);dval=slice_fn(dval,100);_odu=slice_fn(_odu,200);_odr=slice_fn(_odr,800);_odv=slice_fn(_odv,200)
         dtrain=TrajRecData(rn, dtrain, mbr, args, 'train',True)
         dr=TrajRecData(rn, deepcopy(_odr), mbr, args, 'dr',True) 
         du=TrajRecData(rn, deepcopy(_odu), mbr, args, 'du',True)
         dv=TrajRecData(rn, deepcopy(_odv), mbr, args, 'dv',True)
-        dval=TrajRecData(rn, dval, mbr, args, 'valid',False) 
+        path_dval=_trajrec_cache_path(tvt_urv_root, 'TrajRecData-valid')
+        dval=api_pre_trajrecdata(dval, rn, mbr, args, 'valid',False,path_dval)
         root_mma=self.root_model[:self.root_model.index('TrajRec')]+f'TrajMap{self.du_rate}/Origin/'
         dam = DAPlanner(self.root_map, args['id_size'] - 1, utc)
-        args['inferred_seg_path']=os.path.join(root_mma,f'mma-{self.urv}-dr.pk.zst');_dr=TrajRecTestData(rn,deepcopy(_odr), mbr, args,dam) 
-        args['inferred_seg_path']=os.path.join(root_mma,f'mma-{self.urv}-du.pk.zst');_du=TrajRecTestData(rn, deepcopy(_odu), mbr, args,dam) 
-        args['inferred_seg_path']=os.path.join(root_mma,f'mma-{self.urv}-dv.pk.zst');_dv=TrajRecTestData(rn, deepcopy(_odv), mbr, args,dam)
+        args_dr=dict(args); args_dr['inferred_seg_path']=os.path.join(root_mma,f'mma-{self.urv}-dr.pk.zst')
+        args_du=dict(args); args_du['inferred_seg_path']=os.path.join(root_mma,f'mma-{self.urv}-du.pk.zst')
+        args_dv=dict(args); args_dv['inferred_seg_path']=os.path.join(root_mma,f'mma-{self.urv}-dv.pk.zst')
+        _dr=api_pre_trajrectestdata(deepcopy(_odr), rn, mbr, args_dr, dam, _trajrec_cache_path(tvt_urv_root, f'TrajRecTest-dr-{args["planner"]}'))
+        _du=api_pre_trajrectestdata(deepcopy(_odu), rn, mbr, args_du, dam, _trajrec_cache_path(tvt_urv_root, f'TrajRecTest-du-{args["planner"]}'))
+        _dv=api_pre_trajrectestdata(deepcopy(_odv), rn, mbr, args_dv, dam, _trajrec_cache_path(tvt_urv_root, f'TrajRecTest-dv-{args["planner"]}'))
         self._rid_features_dict = torch.from_numpy(rn.get_rid_rnfea_dict(dam, ts)).to(device)
         self.dtrain=dtrain;self.dr=dr;self.du=du ;self.args=args
         self.dval=dval;self._du=_du;self._dr=_dr;self._dv=_dv
         self._odr=_odr;self._odv=_odv;self._odu=_odu;self._dam=dam
         return {'dr':dr,'du':du,'dv':dv,'dtrain':dtrain,'dtest':None,'dval':dval,'dr_eval':_dr,'dv_eval':_dv,'du_eval':_du,'dr_raw':dr_raw,'du_raw':du_raw}
-
-
+    def call_gen_noise(self,num,requires_grad=True):
+        """same as iter(loader)"""
+        res=[]
+        for i in np.random.choice(len(self.dr),num):
+            res.append(self.dr[i])
+        x=self.get_collate_fn()(res)
+        x[5]=torch.randn_like(x[5],requires_grad=requires_grad,device=device)
+        return res
+    def call_add_noise(self,x,noise):
+        x[5]=x[5]+noise[5]
+        return x
     def get_collate_fn(self): 
         return  trmma_collate_fn
     def get_collate_fn_test(self): 
@@ -313,7 +399,7 @@ class TrajRec(TaskModel):
             prob=torch.softmax(prob,dim=-1)
             return prob[0]
         res_du=acc_f1_mae_rmse(rec_du) ; res_dr=acc_f1_mae_rmse(rec_dr) ; res_dv=acc_f1_mae_rmse(rec_dv)
-        return {'MIA':'', 'mia_call':mia_call,
+        return {
                 'F1_Du':res_du['f1'],'F1_Dr':res_dr['f1'],'F1_Dv':res_dv['f1'],
                 'Acc_Du':res_du['acc'],'Acc_Dr':res_dr['acc'],'Acc_Dv':res_dv['acc'],
                 'MAE_Du':res_du['mae'],'MAE_Dr':res_dr['mae'],'MAE_Dv':res_dv['mae'],
