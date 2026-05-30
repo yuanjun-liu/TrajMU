@@ -18,7 +18,7 @@ put data into `../KyData/TrajData/Porto` like path,
 
 or modify the base path at `_tool/mFile.py`,
 
-most datasets can be download at [here](https://github.com/derekwtian/TRMMA), and remain datasets will be uploaded after reivew.
+datasets: [road network](https://github.com/derekwtian/TRMMA) and [processed trajectories](https://drive.google.com/drive/folders/1P2pQMloeQxkEZIdfCybLt0wEPhOephYb).
 
 
 ## run
@@ -38,6 +38,8 @@ obtain the result tables
 ```bash
 
 python mu/traj/plt.py
+
+python mu/traj/analyze_road_network.py
 
 ```
 
